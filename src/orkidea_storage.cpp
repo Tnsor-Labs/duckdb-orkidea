@@ -41,6 +41,7 @@ DatabaseInfo ReadDatabaseInfo(ClientContext &context, ConnectionPool &pool) {
 	info.current_schema = rows[0][0].ToString();
 	auto charset = rows[0][1].IsNull() ? string() : rows[0][1].ToString();
 	info.unicode = charset == "AL32UTF8" || charset == "UTF8";
+	info.utf8_byte_order = charset == "AL32UTF8";
 	return info;
 }
 

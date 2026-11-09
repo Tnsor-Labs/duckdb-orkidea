@@ -39,6 +39,10 @@ struct TranslatedFilter {
 //! Whether comparisons on columns of this Oracle type can be pushed down.
 bool CanCompareColumn(const string &oracle_type);
 
+//! Whether Oracle's ORDER BY on columns of this type (with NLS_SORT = BINARY)
+//! sorts as DuckDB does. `utf8_byte_order`: the database character set is AL32UTF8.
+bool CanOrderColumn(const string &oracle_type, bool utf8_byte_order);
+
 //! Translates a filter expression whose column references all refer to the
 //! column. Filters that only prune rows (optional and dynamic filters) are
 //! dropped when they cannot be translated, and never need local evaluation.

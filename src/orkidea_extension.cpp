@@ -5,6 +5,7 @@
 #include "orkidea_adbc.hpp"
 #include "orkidea_execute.hpp"
 #include "orkidea_logging.hpp"
+#include "orkidea_optimizer.hpp"
 #include "orkidea_query.hpp"
 #include "orkidea_secrets.hpp"
 #include "orkidea_storage.hpp"
@@ -30,6 +31,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	orkidea::ExecuteFunction::Register(loader);
 	orkidea::Storage::Register(loader);
 	orkidea::QueryLogType::Register(loader);
+	orkidea::Optimizer::Register(loader);
 }
 
 void OrkideaExtension::Load(ExtensionLoader &loader) {

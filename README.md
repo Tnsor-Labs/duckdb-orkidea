@@ -29,6 +29,54 @@ CREATE SECRET ora (
 );
 ```
 
+### Attaching a database
+
+Attach the database, and its tables and views read like DuckDB tables:
+
+```sql
+ATTACH 'ora' AS oracle (TYPE orkidea, READ_ONLY);
+
+SELECT region, sum(amount) FROM oracle.orders JOIN oracle.hr.regions USING (region_id) GROUP BY ALL;
+SHOW ALL TABLES;
+```
+
+- The path is a secret name or an `oracle://` URI. `SECRET 'name'` works
+  too, with an empty path.
+- Oracle schemas (users) are DuckDB schemas. The default is the connected
+  user's; `SCHEMA 'HR'` limits the catalog to one. Oracle's own schemas
+  (`SYS`, `XDB`, ...) are left out of listings but can be named.
+- Names match case-insensitively. An exact match comes first, then the
+  unquoted (upper-case) Oracle name.
+- Tables are described on first use and cached until `DETACH`.
+- Each DuckDB transaction runs on one Oracle connection. Writing through the
+  attached database is not supported yet; use `orkidea_execute`.
+
+Scans read only the columns a query needs, and push work into Oracle when
+Oracle gives exactly the result DuckDB would:
+
+- **Filters**: comparisons, `IN`, `BETWEEN`, `IS [NOT] NULL`, `IS [NOT]
+  DISTINCT FROM`, `LIKE 'prefix%'`, boolean columns, `AND`, `OR`, and `NOT`,
+  on numbers, strings, dates, timestamps, `RAW`, and `BOOLEAN`. Some cases
+  stay in DuckDB, which evaluates them on the rows Oracle returns:
+  - Oracle stores an empty string as NULL, so filters with `''` aren't sent.
+  - `CHAR` compares blank-padded, so only its NULL checks are sent.
+  - String ranges are sent only against ASCII constants.
+  - `TIMESTAMP WITH LOCAL TIME ZONE` depends on the session time zone.
+- **LIMIT** becomes `FETCH FIRST n ROWS ONLY`, and **ORDER BY ... LIMIT**
+  sends the order too, with explicit `NULLS FIRST`/`LAST`. Either one is sent
+  only when every filter on the scan runs in Oracle, and an order only on
+  types Oracle sorts as DuckDB does. Strings sort the same only in an
+  AL32UTF8 database.
+
+To see the SQL sent to Oracle:
+
+```sql
+CALL enable_logging('OrkideaQuery', level = 'debug', storage = 'memory');
+SELECT message FROM duckdb_logs WHERE type = 'OrkideaQuery';
+```
+
+### Running Oracle SQL
+
 Run a query on Oracle and use its rows like any table:
 
 ```sql

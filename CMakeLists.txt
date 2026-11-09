@@ -63,6 +63,7 @@ set(EXTENSION_SOURCES
     src/orkidea_execute.cpp
     src/orkidea_filter.cpp
     src/orkidea_logging.cpp
+    src/orkidea_optimizer.cpp
     src/orkidea_query.cpp
     src/orkidea_scan.cpp
     src/orkidea_secrets.cpp

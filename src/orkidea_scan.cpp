@@ -36,8 +36,10 @@ FilterColumn MakeFilterColumn(const OracleTable &table, column_t column, bool un
 //! Plans `SELECT <scanned columns> FROM <table> WHERE <translated filters>`.
 //! A row id that DuckDB scans (for COUNT(*), for example) has no Oracle
 //! column, so a NULL stands in for it and keeps the result columns aligned.
+//! With `order_by` and `row_limit`, the first rows in that order.
 ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<column_t> &column_ids,
-                  optional_ptr<TableFilterSet> filters) {
+                  optional_ptr<TableFilterSet> filters, const vector<ScanOrder> &order_by = {},
+                  optional_idx row_limit = optional_idx()) {
 	vector<string> select_list;
 	for (auto column : column_ids) {
 		select_list.push_back(IsVirtualColumn(column) ? "NULL" : QuoteIdentifier(table.column_names[column]));
@@ -69,6 +71,17 @@ ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<
 	plan.sql = "SELECT " + StringUtil::Join(select_list, ", ") + " FROM " + table.QualifiedName();
 	if (!conditions.empty()) {
 		plan.sql += " WHERE " + StringUtil::Join(conditions, " AND ");
+	}
+	if (!order_by.empty()) {
+		vector<string> keys;
+		for (auto &order : order_by) {
+			keys.push_back(QuoteIdentifier(table.column_names[order.column]) + (order.descending ? " DESC" : " ASC") +
+			               (order.nulls_first ? " NULLS FIRST" : " NULLS LAST"));
+		}
+		plan.sql += " ORDER BY " + StringUtil::Join(keys, ", ");
+	}
+	if (row_limit.IsValid()) {
+		plan.sql += " FETCH FIRST " + to_string(row_limit.GetIndex()) + " ROWS ONLY";
 	}
 	return plan;
 }
@@ -122,8 +135,8 @@ struct TableScanLocalState : public LocalTableFunctionState {
 
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
-	auto plan =
-	    PlanScan(*bind_data.table, bind_data.catalog.GetDatabaseInfo().unicode, input.column_ids, input.filters.get());
+	auto plan = PlanScan(*bind_data.table, bind_data.catalog.GetDatabaseInfo().unicode, input.column_ids,
+	                     input.filters.get(), bind_data.order_by, bind_data.row_limit);
 
 	auto result = make_uniq<TableScanGlobalState>();
 	result->stream = OpenQuery(context, OrkideaTransaction::Get(context, bind_data.catalog).GetConnection(), plan.sql);
@@ -244,6 +257,23 @@ TableScanBindData::TableScanBindData(OrkideaCatalog &catalog_p, shared_ptr<const
       table(std::move(table_p)) {
 }
 
+bool TableScan::HasLocalFilters(const LogicalGet &get) {
+	auto &bind_data = get.bind_data->Cast<TableScanBindData>();
+	auto unicode_database = bind_data.catalog.GetDatabaseInfo().unicode;
+	for (auto &entry : get.table_filters) {
+		auto &column = get.GetColumnIds()[entry.GetIndex().GetIndex()];
+		auto &expr = *ExpressionFilter::GetExpressionFilter(entry.Filter(), "orkidea scan").expr;
+		if (column.IsVirtualColumn()) {
+			return true;
+		}
+		auto filter_column = MakeFilterColumn(*bind_data.table, column.GetPrimaryIndex(), unicode_database);
+		if (TranslateFilter(filter_column, expr).evaluate_locally) {
+			return true;
+		}
+	}
+	return false;
+}
+
 TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalog, shared_ptr<const OracleTable> table,
                                   unique_ptr<FunctionData> &bind_data) {
 	auto result = make_uniq<TableScanBindData>(catalog, std::move(table));
@@ -252,7 +282,7 @@ TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalo
 	result->all_types = result->arrow_table.GetTypes();
 	bind_data = std::move(result);
 
-	TableFunction function("orkidea_scan", {}, Scan, nullptr, InitGlobal, InitLocal);
+	TableFunction function(NAME, {}, Scan, nullptr, InitGlobal, InitLocal);
 	function.projection_pushdown = true;
 	function.filter_pushdown = true;
 	function.filter_prune = true;

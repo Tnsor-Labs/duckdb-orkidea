@@ -25,6 +25,8 @@ struct DatabaseInfo {
 	string current_schema;
 	//! Whether the database character set is AL32UTF8 or UTF8.
 	bool unicode = true;
+	//! Whether it is AL32UTF8, whose byte order is UTF-8 code point order.
+	bool utf8_byte_order = true;
 };
 
 //! Idle connections of one attached database, reused across transactions.

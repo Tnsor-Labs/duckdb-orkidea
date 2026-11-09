@@ -284,11 +284,20 @@ public:
 		if (BoundComparisonExpression::IsComparison(expr)) {
 			return TranslateComparison(expr.Cast<BoundFunctionExpression>());
 		}
+		// A BOOLEAN column on its own, as in WHERE flag, selects its TRUE rows.
+		if (IsColumn(expr)) {
+			return kind == ColumnKind::BOOLEAN ? Exact(column.sql + " = TRUE") : LOCAL_ONLY;
+		}
 		switch (expr.GetExpressionClass()) {
 		case ExpressionClass::BOUND_CONJUNCTION:
 			return TranslateConjunction(expr.Cast<BoundConjunctionExpression>());
-		case ExpressionClass::BOUND_OPERATOR:
-			return TranslateOperator(expr.Cast<BoundOperatorExpression>());
+		case ExpressionClass::BOUND_OPERATOR: {
+			auto &op = expr.Cast<BoundOperatorExpression>();
+			if (op.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+				return TranslateNot(op);
+			}
+			return TranslateOperator(op);
+		}
 		default:
 			return LOCAL_ONLY;
 		}
@@ -375,6 +384,21 @@ private:
 		return TranslatedFilter {"(" + StringUtil::Join(parts, is_and ? " AND " : " OR ") + ")", evaluate_locally};
 	}
 
+	//! NOT of a condition Oracle evaluates exactly is exact too: both follow
+	//! SQL's three-valued logic, so NULL stays NULL. NOT of a superset is not.
+	TranslatedFilter TranslateNot(const BoundOperatorExpression &op) const {
+		// Optional filters translate to a superset while reporting no local
+		// evaluation, so their negation cannot be pushed.
+		if (op.GetChildren().size() != 1 || IsInternal(*op.GetChildren()[0])) {
+			return LOCAL_ONLY;
+		}
+		auto inner = Translate(*op.GetChildren()[0]);
+		if (inner.sql.empty() || inner.evaluate_locally) {
+			return LOCAL_ONLY;
+		}
+		return Exact("NOT (" + inner.sql + ")");
+	}
+
 	TranslatedFilter TranslateOperator(const BoundOperatorExpression &op) const {
 		auto &children = op.GetChildren();
 		if (children.empty() || !IsColumn(*children[0]) || kind == ColumnKind::NONE) {
@@ -417,6 +441,27 @@ private:
 bool CanCompareColumn(const string &oracle_type) {
 	auto kind = Classify(oracle_type);
 	return kind != ColumnKind::NONE && kind != ColumnKind::NULL_CHECKS_ONLY;
+}
+
+bool CanOrderColumn(const string &oracle_type, bool utf8_byte_order) {
+	switch (Classify(oracle_type)) {
+	case ColumnKind::NUMBER:
+	case ColumnKind::BINARY_FLOAT:
+	case ColumnKind::BINARY_DOUBLE:
+	case ColumnKind::DATE:
+	case ColumnKind::TIMESTAMP:
+	case ColumnKind::TIMESTAMP_TZ:
+	case ColumnKind::RAW:
+	case ColumnKind::BOOLEAN:
+		return true;
+	case ColumnKind::VARCHAR:
+		// With NLS_SORT = BINARY, Oracle sorts AL32UTF8 bytes, which is UTF-8
+		// code point order, as DuckDB does. UTF8 (CESU-8) and the national
+		// character set (UTF-16) sort supplementary characters differently.
+		return utf8_byte_order;
+	default:
+		return false;
+	}
 }
 
 TranslatedFilter TranslateFilter(const FilterColumn &column, const Expression &expr) {
