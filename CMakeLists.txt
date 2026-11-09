@@ -49,6 +49,12 @@ corrosion_import_crate(
   release
   LOCKED)
 
+# DuckDB links the C runtime statically on Windows (CMAKE_MSVC_RUNTIME_LIBRARY
+# is MultiThreaded), so the driver and the C code it builds (aws-lc) must too.
+if(MSVC)
+  corrosion_add_target_rustflags(orkidea_duckdb -Ctarget-feature=+crt-static)
+endif()
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
