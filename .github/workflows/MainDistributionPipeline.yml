@@ -19,6 +19,11 @@ jobs:
       duckdb_version: v2.0.0
       ci_tools_version: v2.0-cyanoptera
       extension_name: orkidea
+      # The driver is Rust, linked in as a static library.
+      extra_toolchains: 'rust'
+      # Not built yet: WebAssembly (the driver needs TCP sockets), MinGW, and
+      # musl (no Rust target selection for them yet).
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;linux_amd64_musl;linux_arm64_musl'
 
   code-quality-check:
     name: Code Quality Check
