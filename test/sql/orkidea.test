@@ -1,0 +1,10 @@
+# name: test/sql/orkidea.test
+# description: The extension loads and its linked driver initializes.
+# group: [orkidea]
+
+require orkidea
+
+query I
+SELECT orkidea_version() LIKE 'orkidea % (ADBC 1.1.0)';
+----
+true
