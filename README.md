@@ -106,6 +106,30 @@ CALL enable_logging('OrkideaQuery', level = 'debug', storage = 'memory');
 SELECT message FROM duckdb_logs WHERE type = 'OrkideaQuery';
 ```
 
+### Federated queries
+
+An attached Oracle database is one catalog among others. A query can join it
+with Postgres, MySQL, SQLite, DuckDB files, and Parquet, CSV, JSON, Iceberg,
+or Delta data, local or in object storage. Each scan pushes down what its
+source can run, and DuckDB joins the results:
+
+```sql
+INSTALL postgres;
+CREATE SECRET pg (TYPE postgres, HOST 'pg.example.com', DATABASE 'ops', USER 'app', PASSWORD '...');
+ATTACH '' AS pg (TYPE postgres, SECRET pg);
+
+-- Oracle orders and customers, Postgres shipments and reviews
+SELECT carrier, s.late, avg(r.rating) AS rating, sum(o.amount) AS order_value
+FROM pg.logistics.reviews r
+JOIN pg.logistics.shipments s USING (order_id)
+JOIN oracle.orders o ON o.order_id = r.order_id
+GROUP BY ALL;
+
+-- copy from Oracle into Postgres in one statement
+CREATE TABLE pg.analytics.vip_customers AS
+    SELECT customer_id, full_name, country FROM oracle.customers WHERE vip;
+```
+
 ### Running Oracle SQL
 
 Run a query on Oracle and use its rows like any table:

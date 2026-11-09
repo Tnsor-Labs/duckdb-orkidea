@@ -4,6 +4,7 @@
 
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -260,6 +261,53 @@ bool IsColumn(const Expression &expr) {
 	return expression_class == ExpressionClass::BOUND_REF || expression_class == ExpressionClass::BOUND_COLUMN_REF;
 }
 
+//! Whether a cast keeps every value of its source and orders them the same
+//! way, so that comparing the cast column is comparing the column: a
+//! timestamp to a finer one, or an integer or decimal to a numeric type with
+//! at least its scale that cannot overflow. DuckDB adds such casts to compare
+//! columns with constants of a wider type, as a TIMESTAMP(3) column with a
+//! TIMESTAMP literal. Casts to floating point are left out: they round.
+bool IsWideningCast(const LogicalType &source, const LogicalType &target) {
+	if (target.id() == LogicalTypeId::TIMESTAMP) {
+		// DuckDB can throw here for years past microsecond range, which an
+		// Oracle timestamp (year 9999 at most) never reaches.
+		return source.id() == LogicalTypeId::TIMESTAMP_SEC || source.id() == LogicalTypeId::TIMESTAMP_MS;
+	}
+	if (BoundCastExpression::CastCanThrow(source, target, false)) {
+		return false;
+	}
+	switch (target.id()) {
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::DECIMAL: {
+		if (!source.IsIntegral() && source.id() != LogicalTypeId::DECIMAL) {
+			return false;
+		}
+		auto scale = [](const LogicalType &type) {
+			return type.id() == LogicalTypeId::DECIMAL ? DecimalType::GetScale(type) : uint8_t(0);
+		};
+		return scale(target) >= scale(source);
+	}
+	default:
+		return false;
+	}
+}
+
+//! A column, or a widening cast of one (see IsWideningCast).
+bool IsColumnOrWidened(const Expression &expr) {
+	if (IsColumn(expr)) {
+		return true;
+	}
+	if (!BoundCastExpression::IsCast(expr)) {
+		return false;
+	}
+	auto &cast = expr.Cast<BoundFunctionExpression>();
+	return !BoundCastExpression::IsTryCast(cast) && IsColumn(BoundCastExpression::Child(cast)) &&
+	       IsWideningCast(BoundCastExpression::SourceType(cast), BoundCastExpression::TargetType(cast));
+}
+
 bool IsInternal(const Expression &expr) {
 	return expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
 	       TableFilterFunctions::IsTableFilterFunction(expr.Cast<BoundFunctionExpression>().Function());
@@ -328,9 +376,9 @@ private:
 		auto &left = BoundComparisonExpression::Left(comparison);
 		auto &right = BoundComparisonExpression::Right(comparison);
 		const Value *constant;
-		if (IsColumn(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		if (IsColumnOrWidened(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 			constant = &right.Cast<BoundConstantExpression>().GetValue();
-		} else if (IsColumn(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		} else if (IsColumnOrWidened(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 			constant = &left.Cast<BoundConstantExpression>().GetValue();
 			type = FlipComparisonExpression(type);
 		} else {
@@ -401,7 +449,7 @@ private:
 
 	TranslatedFilter TranslateOperator(const BoundOperatorExpression &op) const {
 		auto &children = op.GetChildren();
-		if (children.empty() || !IsColumn(*children[0]) || kind == ColumnKind::NONE) {
+		if (children.empty() || !IsColumnOrWidened(*children[0]) || kind == ColumnKind::NONE) {
 			return LOCAL_ONLY;
 		}
 		switch (op.GetExpressionType()) {
