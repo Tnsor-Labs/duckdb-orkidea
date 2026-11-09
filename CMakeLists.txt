@@ -11,9 +11,9 @@ set(CMAKE_CXX_STANDARD
     CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# The Orkidea driver is Rust, built by Corrosion as a static library and
-# linked into the extension. Build it for the platform DuckDB is built for,
-# which in cross builds (macOS x86_64 on arm64, for example) is not the host.
+# The Orkidea driver is Rust, built by Corrosion as a static library and linked
+# into the extension. Build it for the platform DuckDB is built for, which in
+# cross builds (macOS x86_64 on arm64, for example) is not the host.
 set(Rust_CARGO_TARGET "")
 if("${OS_NAME}" STREQUAL "linux")
   if("${OS_ARCH}" STREQUAL "arm64")
@@ -39,10 +39,14 @@ endif()
 
 add_subdirectory(corrosion EXCLUDE_FROM_ALL)
 corrosion_import_crate(
-  MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
-  CRATES orkidea-duckdb
-  CRATE_TYPES staticlib
-  PROFILE release
+  MANIFEST_PATH
+  ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
+  CRATES
+  orkidea-duckdb
+  CRATE_TYPES
+  staticlib
+  PROFILE
+  release
   LOCKED)
 
 include_directories(src/include)
@@ -52,14 +56,16 @@ set(EXTENSION_SOURCES src/orkidea_extension.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# The static extension links Corrosion's imported library target, which
-# (unlike the interface target) can appear in DuckDB's export set.
+# The static extension links Corrosion's imported library target, which (unlike
+# the interface target) can appear in DuckDB's export set.
 set(ORKIDEA_PLATFORM_LIBS "")
 if(APPLE)
   set(ORKIDEA_PLATFORM_LIBS "-framework CoreFoundation" "-framework Security")
 endif()
-target_link_libraries(${EXTENSION_NAME} orkidea_duckdb-static ${ORKIDEA_PLATFORM_LIBS})
-target_link_libraries(${LOADABLE_EXTENSION_NAME} orkidea_duckdb ${ORKIDEA_PLATFORM_LIBS})
+target_link_libraries(${EXTENSION_NAME} orkidea_duckdb-static
+                      ${ORKIDEA_PLATFORM_LIBS})
+target_link_libraries(${LOADABLE_EXTENSION_NAME} orkidea_duckdb
+                      ${ORKIDEA_PLATFORM_LIBS})
 
 install(
   TARGETS ${EXTENSION_NAME}

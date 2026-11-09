@@ -1,6 +1,6 @@
 # name: test/sql/orkidea.test
 # description: The extension loads and its linked driver initializes.
-# group: [orkidea]
+# group: [sql]
 
 require orkidea
 
