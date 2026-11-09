@@ -18,6 +18,16 @@ namespace orkidea {
 class OrkideaCatalog;
 class OrkideaTableEntry;
 
+//! A table as the schema's listing shows it, before it is described.
+struct TableListing {
+	//! The optimizer's row count, or -1 when unknown.
+	int64_t estimated_rows = -1;
+	//! Whether several sessions can read it in ROWID ranges.
+	bool splittable = false;
+
+	static TableListing FromRow(const vector<Value> &row);
+};
+
 class OrkideaSchemaEntry : public SchemaCatalogEntry {
 public:
 	OrkideaSchemaEntry(OrkideaCatalog &catalog, CreateSchemaInfo &info);
@@ -56,8 +66,8 @@ private:
 
 	mutex lock;
 	bool tables_listed = false;
-	//! Oracle table names, and the optimizer's row count when known (-1 when not).
-	unordered_map<string, int64_t> table_names;
+	//! Oracle table names, as listed.
+	unordered_map<string, TableListing> table_names;
 	//! Described tables, keyed by Oracle name.
 	unordered_map<string, unique_ptr<OrkideaTableEntry>> tables;
 };

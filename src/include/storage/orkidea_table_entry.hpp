@@ -27,6 +27,8 @@ struct OracleTable {
 	ArrowSchemaWrapper arrow_schema;
 	//! The optimizer's row count (ALL_TABLES.NUM_ROWS), or -1 when unknown.
 	int64_t estimated_rows = -1;
+	//! Whether several sessions can read it in ROWID ranges: a heap table.
+	bool splittable = false;
 
 	//! The quoted, schema-qualified name.
 	string QualifiedName() const;

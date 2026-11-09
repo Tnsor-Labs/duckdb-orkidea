@@ -1,0 +1,105 @@
+# name: test/sql/attach_parallel.test
+# description: A table read through several sessions in ROWID ranges gives the rows, in the order, of one session.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE ORKIDEA_DUCK_PARALLEL PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE ORKIDEA_DUCK_PARALLEL (id NUMBER(10), amount NUMBER(12,2), label VARCHAR2(40), at TIMESTAMP, flag BOOLEAN)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT /*+ APPEND */ INTO ORKIDEA_DUCK_PARALLEL SELECT level, MOD(level * 7919, 100000) / 100, CASE WHEN MOD(level, 11) = 0 THEN NULL ELSE ''label '' || level END, TIMESTAMP ''2024-01-01 00:00:00'' + NUMTODSINTERVAL(level, ''MINUTE''), MOD(level, 3) = 0 FROM dual CONNECT BY level <= 300000');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, ''ORKIDEA_DUCK_PARALLEL''); END;');
+
+# Oracle cannot read a table AS OF a change number within seconds of its
+# creation (ORA-01466), and the scan would fall back to one session.
+statement ok
+FROM orkidea_execute('ora', 'BEGIN DBMS_SESSION.SLEEP(5); END;');
+
+statement ok
+ATTACH 'ora' AS o (TYPE orkidea, READ_ONLY);
+
+statement ok
+SET threads = 4;
+
+statement ok
+SET orkidea_parallel_scan = 1;
+
+statement ok
+CREATE TABLE serial AS FROM o.ORKIDEA_DUCK_PARALLEL;
+
+statement ok
+CALL enable_logging('OrkideaQuery', level = 'debug', storage = 'memory');
+
+statement ok
+SET orkidea_parallel_scan = 4;
+
+statement ok
+SET orkidea_parallel_scan_min_rows = 0;
+
+statement ok
+CREATE TABLE parallel AS FROM o.ORKIDEA_DUCK_PARALLEL;
+
+# The scan was read in ranges, AS OF one change number.
+query I
+SELECT count(*) >= 2 FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%ROWID%';
+----
+true
+
+query I
+SELECT count(DISTINCT regexp_extract(message, 'AS OF SCN (\d+)', 1)) FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%ROWID%';
+----
+1
+
+query II
+SELECT (SELECT count(*) FROM (FROM serial EXCEPT ALL FROM parallel)), (SELECT count(*) FROM (FROM parallel EXCEPT ALL FROM serial));
+----
+0	0
+
+query I
+SELECT count(*) FROM parallel;
+----
+300000
+
+# Insertion order is kept: rows come in ROWID order, which here is id order.
+query I
+SELECT count(*) FROM (SELECT id - lag(id) OVER () AS step FROM parallel) WHERE step < 0;
+----
+0
+
+# Filters go into every range.
+query I
+SELECT (SELECT (count(*), sum(amount)) FROM o.ORKIDEA_DUCK_PARALLEL WHERE flag AND id > 1000)
+     = (SELECT (count(*), sum(amount)) FROM serial WHERE flag AND id > 1000);
+----
+true
+
+# A LIMIT needs one stream.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (FROM o.ORKIDEA_DUCK_PARALLEL LIMIT 5);
+----
+5
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%';
+----
+0
+
+statement ok
+DETACH o;
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE ORKIDEA_DUCK_PARALLEL PURGE');

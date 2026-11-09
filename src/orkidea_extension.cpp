@@ -7,6 +7,7 @@
 #include "orkidea_logging.hpp"
 #include "orkidea_optimizer.hpp"
 #include "orkidea_query.hpp"
+#include "orkidea_scan.hpp"
 #include "orkidea_secrets.hpp"
 #include "orkidea_storage.hpp"
 
@@ -32,6 +33,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	orkidea::Storage::Register(loader);
 	orkidea::QueryLogType::Register(loader);
 	orkidea::Optimizer::Register(loader);
+	orkidea::TableScan::RegisterSettings(loader);
 }
 
 void OrkideaExtension::Load(ExtensionLoader &loader) {

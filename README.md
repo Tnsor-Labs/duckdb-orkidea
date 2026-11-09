@@ -68,6 +68,37 @@ Oracle gives exactly the result DuckDB would:
   types Oracle sorts as DuckDB does. Strings sort the same only in an
   AL32UTF8 database.
 
+### Parallel scans
+
+A table with 500,000 rows or more (by Oracle's optimizer statistics) is read
+through several sessions at once: as many as DuckDB has threads, up to 8.
+Each session reads ranges of the table's ROWIDs, so together they read the
+table once. All of them read `AS OF SCN` one change number taken first, so
+the result is one consistent snapshot. Batches keep ROWID order, so
+`CREATE TABLE ... AS` and `INSERT ... SELECT` keep the order a single
+session would give. On a 2,000,000-row table, copying it into DuckDB took
+2.5 s through four sessions instead of 5.9 s through one.
+
+```sql
+SET orkidea_parallel_scan = 4;               -- sessions per scan; 0 or 1 for one, -1 (default) to choose
+SET orkidea_parallel_scan_min_rows = 100000; -- default 500000
+```
+
+The cut points come from the table's extents in `DBA_EXTENTS`. Without
+access to it, they are spread over the block range between the first and
+the last row, which balances the work less well. A table is read through
+one session, without a warning, when:
+
+- it is a view, or an index-organized, clustered, or temporary table;
+- the query has a `LIMIT` or `ORDER BY ... LIMIT` that Oracle runs;
+- the user cannot call `DBMS_FLASHBACK` (`GRANT EXECUTE ON DBMS_FLASHBACK`);
+- Oracle refuses the flashback read: no `FLASHBACK` privilege on another
+  user's table, or a table created or altered within the last few seconds
+  (ORA-01466).
+
+A scan that runs longer than the database's undo retention can fail with
+ORA-01555.
+
 To see the SQL sent to Oracle:
 
 ```sql

@@ -15,6 +15,8 @@
 #include "duckdb/function/table/arrow.hpp"
 
 namespace duckdb {
+class ExtensionLoader;
+
 namespace orkidea {
 
 class OrkideaCatalog;
@@ -45,6 +47,8 @@ struct TableScan {
 	//! The scan function and its bind data for a table.
 	static TableFunction Function(ClientContext &context, OrkideaCatalog &catalog, shared_ptr<const OracleTable> table,
 	                              unique_ptr<FunctionData> &bind_data);
+	//! The settings that control parallel scans.
+	static void RegisterSettings(ExtensionLoader &loader);
 	//! Whether DuckDB must evaluate any of the scan's filters itself, which
 	//! rules out fetching only the first rows.
 	static bool HasLocalFilters(const LogicalGet &get);

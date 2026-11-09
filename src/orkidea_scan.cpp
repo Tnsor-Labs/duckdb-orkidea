@@ -1,11 +1,14 @@
 #include "orkidea_scan.hpp"
 
 #include "orkidea_filter.hpp"
+#include "orkidea_partition.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_catalog.hpp"
 #include "storage/orkidea_transaction.hpp"
 
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -36,10 +39,13 @@ FilterColumn MakeFilterColumn(const OracleTable &table, column_t column, bool un
 //! Plans `SELECT <scanned columns> FROM <table> WHERE <translated filters>`.
 //! A row id that DuckDB scans (for COUNT(*), for example) has no Oracle
 //! column, so a NULL stands in for it and keeps the result columns aligned.
-//! With `order_by` and `row_limit`, the first rows in that order.
+//! With `order_by` and `row_limit`, the first rows in that order. `source` is
+//! the FROM clause (the table, or the table AS OF a change number), and
+//! `range` an extra condition (a ROWID range).
 ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<column_t> &column_ids,
                   optional_ptr<TableFilterSet> filters, const vector<ScanOrder> &order_by = {},
-                  optional_idx row_limit = optional_idx()) {
+                  optional_idx row_limit = optional_idx(), const string &source = string(),
+                  const string &range = string()) {
 	vector<string> select_list;
 	for (auto column : column_ids) {
 		select_list.push_back(IsVirtualColumn(column) ? "NULL" : QuoteIdentifier(table.column_names[column]));
@@ -50,6 +56,9 @@ ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<
 
 	ScanPlan plan;
 	vector<string> conditions;
+	if (!range.empty()) {
+		conditions.push_back(range);
+	}
 	if (filters) {
 		for (auto &entry : *filters) {
 			auto scan_index = entry.GetIndex().GetIndex();
@@ -68,7 +77,8 @@ ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<
 		}
 	}
 
-	plan.sql = "SELECT " + StringUtil::Join(select_list, ", ") + " FROM " + table.QualifiedName();
+	plan.sql =
+	    "SELECT " + StringUtil::Join(select_list, ", ") + " FROM " + (source.empty() ? table.QualifiedName() : source);
 	if (!conditions.empty()) {
 		plan.sql += " WHERE " + StringUtil::Join(conditions, " AND ");
 	}
@@ -123,15 +133,137 @@ private:
 	shared_ptr<const OracleTable> table;
 };
 
+constexpr const char *PARALLEL_SCAN_SETTING = "orkidea_parallel_scan";
+constexpr const char *PARALLEL_SCAN_MIN_ROWS_SETTING = "orkidea_parallel_scan_min_rows";
+//! The most sessions an automatic parallel scan uses.
+constexpr idx_t MAX_AUTOMATIC_SESSIONS = 8;
+//! Ranges per session, so that a thread that finishes early takes another.
+constexpr idx_t RANGES_PER_SESSION = 4;
+//! Batch numbers within a range take the low bits of a batch index.
+constexpr idx_t BATCH_BITS = 32;
+
+//! Either one stream that every thread reads batches from (DuckDB's Arrow
+//! scan state), or ROWID ranges that threads read whole, each on its own
+//! session.
 struct TableScanGlobalState : public ArrowScanGlobalState {
 	vector<pair<idx_t, unique_ptr<Expression>>> local_filters;
+	//! The statement for each range; empty for a single stream.
+	vector<string> ranges;
+	atomic<idx_t> next_range {0};
+	//! The first range, opened in InitGlobal to check the table can be read
+	//! AS OF the change number; taken by the thread that claims range 0.
+	unique_ptr<StatementStream> first_range;
+
+	bool ReadsRanges() const {
+		return !ranges.empty();
+	}
 };
 
 //! DuckDB's Arrow scan state, and an executor for each local filter.
 struct TableScanLocalState : public LocalTableFunctionState {
-	unique_ptr<LocalTableFunctionState> arrow;
+	unique_ptr<ArrowScanLocalState> arrow;
+	//! The range this thread is reading, when the scan reads ranges, its
+	//! index, and how many of its batches the thread has read.
+	unique_ptr<StatementStream> range;
+	idx_t range_index = 0;
+	idx_t range_batches = 0;
 	vector<pair<idx_t, unique_ptr<ExpressionExecutor>>> filters;
 };
+
+//! How many sessions a scan of the table should use: 1 for a single stream.
+idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data) {
+	// A pushed LIMIT or order needs one ordered stream.
+	if (!bind_data.table->splittable || bind_data.row_limit.IsValid() || !bind_data.order_by.empty()) {
+		return 1;
+	}
+	Value setting;
+	int64_t sessions = -1;
+	if (context.TryGetCurrentSetting(PARALLEL_SCAN_SETTING, setting)) {
+		sessions = setting.GetValue<int64_t>();
+	}
+	idx_t min_rows = 500000;
+	if (context.TryGetCurrentSetting(PARALLEL_SCAN_MIN_ROWS_SETTING, setting)) {
+		min_rows = setting.GetValue<idx_t>();
+	}
+	if (sessions == 0 || sessions == 1 || bind_data.table->estimated_rows < 0 ||
+	    NumericCast<idx_t>(bind_data.table->estimated_rows) < min_rows) {
+		return 1;
+	}
+	auto threads = NumericCast<idx_t>(context.db->NumberOfThreads());
+	if (sessions < 0) {
+		return MinValue<idx_t>(threads, MAX_AUTOMATIC_SESSIONS);
+	}
+	return MinValue<idx_t>(threads, NumericCast<idx_t>(sessions));
+}
+
+//! Plans the scan as ROWID ranges read AS OF one change number, and opens the
+//! first. Returns false, having changed nothing, when the table cannot be
+//! read that way: it has no ROWID cut points, the user may not take a change
+//! number, or Oracle refuses the flashback read (no FLASHBACK privilege, or
+//! ORA-01466 after a recent change to the table's definition).
+bool PlanRanges(ClientContext &context, const TableScanBindData &bind_data, TableFunctionInitInput &input,
+                idx_t sessions, TableScanGlobalState &state) {
+	auto &table = *bind_data.table;
+	auto planning = bind_data.catalog.AcquireConnection();
+	auto scn = CurrentScn(context, planning);
+	if (!scn.IsValid()) {
+		return false;
+	}
+	auto conditions = RowidRanges::Plan(context, planning, table, sessions * RANGES_PER_SESSION);
+	if (conditions.size() < 2) {
+		return false;
+	}
+	auto source = table.QualifiedName() + " AS OF SCN " + to_string(scn.GetIndex());
+	auto unicode = bind_data.catalog.GetDatabaseInfo().unicode;
+	vector<string> ranges;
+	for (auto &condition : conditions) {
+		auto plan =
+		    PlanScan(table, unicode, input.column_ids, input.filters.get(), {}, optional_idx(), source, condition);
+		ranges.push_back(std::move(plan.sql));
+	}
+	try {
+		state.first_range = OpenQuery(context, bind_data.catalog.AcquireConnection(), ranges[0]);
+	} catch (std::exception &) {
+		return false;
+	}
+	state.ranges = std::move(ranges);
+	state.max_threads = MinValue<idx_t>(sessions, state.ranges.size());
+	return true;
+}
+
+//! Moves the thread to the next batch of its range, or to the next range.
+//! Returns false when every range has been read.
+bool NextRangeBatch(ClientContext &context, const TableScanBindData &bind_data, TableScanGlobalState &global,
+                    TableScanLocalState &state) {
+	while (true) {
+		if (!state.range) {
+			auto index = global.next_range++;
+			if (index >= global.ranges.size()) {
+				return false;
+			}
+			state.range = index == 0 ? std::move(global.first_range)
+			                         : OpenQuery(context, bind_data.catalog.AcquireConnection(), global.ranges[index]);
+			state.range_index = index;
+			state.range_batches = 0;
+		}
+		auto chunk = state.range->GetNextChunk();
+		if (!chunk->arrow_array.release) {
+			// The range is done; its session goes back to the pool.
+			state.range.reset();
+			continue;
+		}
+		if (chunk->arrow_array.length == 0) {
+			continue;
+		}
+		state.arrow->Reset();
+		state.arrow->chunk = std::move(chunk);
+		// Batches are numbered in ROWID order, range by range, so that an
+		// insertion-order preserving sink can put batches from different
+		// threads back in order.
+		state.arrow->batch_index = ((state.range_index + 1) << BATCH_BITS) + ++state.range_batches;
+		return true;
+	}
+}
 
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
@@ -139,10 +271,14 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	                     input.filters.get(), bind_data.order_by, bind_data.row_limit);
 
 	auto result = make_uniq<TableScanGlobalState>();
-	result->stream = OpenQuery(context, OrkideaTransaction::Get(context, bind_data.catalog).GetConnection(), plan.sql);
-	// One stream feeds every thread; threads convert its batches in parallel.
-	result->max_threads = context.db->NumberOfThreads();
 	result->local_filters = std::move(plan.local_filters);
+	auto sessions = ScanSessions(context, bind_data);
+	if (sessions < 2 || !PlanRanges(context, bind_data, input, sessions, *result)) {
+		// One stream feeds every thread; threads convert its batches in parallel.
+		result->stream =
+		    OpenQuery(context, OrkideaTransaction::Get(context, bind_data.catalog).GetConnection(), plan.sql);
+		result->max_threads = context.db->NumberOfThreads();
+	}
 	// Columns only filters need are scanned, then left out of the output.
 	if (!input.projection_ids.empty()) {
 		result->projection_ids = input.projection_ids;
@@ -158,7 +294,20 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
                                               GlobalTableFunctionState *global_state) {
 	auto &global = global_state->Cast<TableScanGlobalState>();
 	auto result = make_uniq<TableScanLocalState>();
-	result->arrow = ArrowTableFunction::ArrowScanInitLocal(context, input, global_state);
+	if (global.ReadsRanges()) {
+		// As ArrowScanInitLocal, without taking a batch from a shared stream.
+		result->arrow = make_uniq<ArrowScanLocalState>(make_uniq<ArrowArrayWrapper>(), context.client);
+		result->arrow->column_ids = input.column_ids;
+		result->arrow->filters = input.filters.get();
+		if (global.CanRemoveFilterColumns()) {
+			result->arrow->all_columns.Initialize(context.client, global.scanned_types);
+		}
+	} else {
+		auto arrow = ArrowTableFunction::ArrowScanInitLocal(context, input, global_state);
+		if (arrow) {
+			result->arrow = unique_ptr_cast<LocalTableFunctionState, ArrowScanLocalState>(std::move(arrow));
+		}
+	}
 	for (auto &filter : global.local_filters) {
 		result->filters.emplace_back(filter.first, make_uniq<ExpressionExecutor>(context.client, *filter.second));
 	}
@@ -192,12 +341,16 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 	}
 	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
 	auto &global = input.global_state->Cast<TableScanGlobalState>();
-	auto &arrow = state.arrow->Cast<ArrowScanLocalState>();
+	auto &arrow = *state.arrow;
 	auto &scanned = global.CanRemoveFilterColumns() ? arrow.all_columns : output;
 	while (true) {
 		auto length = NumericCast<idx_t>(arrow.chunk->arrow_array.length);
 		if (arrow.chunk_offset >= length) {
-			if (!ArrowTableFunction::ArrowScanParallelStateNext(context, input.bind_data.get(), arrow, global)) {
+			bool more =
+			    global.ReadsRanges()
+			        ? NextRangeBatch(context, bind_data, global, state)
+			        : ArrowTableFunction::ArrowScanParallelStateNext(context, input.bind_data.get(), arrow, global);
+			if (!more) {
 				return;
 			}
 			length = NumericCast<idx_t>(arrow.chunk->arrow_array.length);
@@ -219,6 +372,14 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		output.Verify(context);
 		return;
 	}
+}
+
+OperatorPartitionData PartitionData(ClientContext &, TableFunctionGetPartitionInput &input) {
+	if (input.partition_info.RequiresPartitionColumns()) {
+		throw InternalException("orkidea_scan: partition columns are not supported");
+	}
+	auto &state = input.local_state->Cast<TableScanLocalState>();
+	return OperatorPartitionData(state.arrow ? state.arrow->batch_index : 0);
 }
 
 bool PushdownExpression(ClientContext &, const LogicalGet &get, Expression &expr) {
@@ -257,6 +418,18 @@ TableScanBindData::TableScanBindData(OrkideaCatalog &catalog_p, shared_ptr<const
       table(std::move(table_p)) {
 }
 
+void TableScan::RegisterSettings(ExtensionLoader &loader) {
+	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	config.AddExtensionOption(PARALLEL_SCAN_SETTING,
+	                          "How many Oracle sessions one scan of an attached table may read through at once: -1 "
+	                          "chooses (DuckDB's thread count, up to 8), 0 or 1 reads through one session",
+	                          LogicalType::BIGINT, Value::BIGINT(-1));
+	config.AddExtensionOption(PARALLEL_SCAN_MIN_ROWS_SETTING,
+	                          "Oracle tables with fewer rows than this (by their optimizer statistics) are read "
+	                          "through one session",
+	                          LogicalType::UBIGINT, Value::UBIGINT(500000));
+}
+
 bool TableScan::HasLocalFilters(const LogicalGet &get) {
 	auto &bind_data = get.bind_data->Cast<TableScanBindData>();
 	auto unicode_database = bind_data.catalog.GetDatabaseInfo().unicode;
@@ -289,6 +462,7 @@ TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalo
 	function.pushdown_expression = PushdownExpression;
 	function.supports_pushdown_type = SupportsPushdownType;
 	function.cardinality = Cardinality;
+	function.get_partition_data = PartitionData;
 	return function;
 }
 

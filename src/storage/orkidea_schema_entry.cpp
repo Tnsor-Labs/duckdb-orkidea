@@ -24,17 +24,33 @@ string TablesQuery(const string &owner) {
 	// The owner filter goes into each branch: on the union as a whole, Oracle
 	// reads every owner's objects first.
 	auto owner_literal = QuoteLiteral(owner);
-	return "SELECT table_name, num_rows FROM ("
-	       " SELECT t.table_name, t.num_rows FROM all_tables t"
+	// Only heap tables can be read in ROWID ranges by several sessions: not
+	// index-organized or clustered tables, and not temporary ones, whose rows
+	// each session sees on its own.
+	return "SELECT table_name, num_rows, splittable FROM ("
+	       " SELECT t.table_name, t.num_rows,"
+	       "  CASE WHEN t.iot_type IS NULL AND t.cluster_name IS NULL AND t.temporary = 'N' THEN 'Y' ELSE 'N' END"
+	       "  AS splittable FROM all_tables t"
 	       "  WHERE t.owner = " +
 	       owner_literal +
 	       "    AND t.dropped = 'NO' AND t.secondary = 'N' AND t.nested = 'NO'"
 	       "    AND (t.iot_type IS NULL OR t.iot_type = 'IOT')"
 	       "    AND NOT EXISTS (SELECT 1 FROM all_mviews m WHERE m.owner = t.owner AND m.mview_name = t.table_name)"
-	       " UNION ALL SELECT view_name, NULL FROM all_views WHERE owner = " +
-	       owner_literal + " UNION ALL SELECT mview_name, NULL FROM all_mviews WHERE owner = " + owner_literal +
+	       " UNION ALL SELECT view_name, NULL, 'N' FROM all_views WHERE owner = " +
+	       owner_literal + " UNION ALL SELECT mview_name, NULL, 'N' FROM all_mviews WHERE owner = " + owner_literal +
 	       ") WHERE 1 = 1";
 }
+
+} // namespace
+
+TableListing TableListing::FromRow(const vector<Value> &row) {
+	TableListing listing;
+	listing.estimated_rows = row[1].IsNull() ? -1 : row[1].GetValue<int64_t>();
+	listing.splittable = row[2].ToString() == "Y";
+	return listing;
+}
+
+namespace {
 
 [[noreturn]] void ThrowNotSupported(const char *what) {
 	throw NotImplementedException("%s in an attached Oracle database is not supported", what);
@@ -58,7 +74,7 @@ void OrkideaSchemaEntry::ListTables(ClientContext &context) {
 	}
 	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
 	for (auto &row : QueryRows(context, connection, TablesQuery(name.GetIdentifierName()))) {
-		table_names[row[0].ToString()] = row[1].IsNull() ? -1 : row[1].GetValue<int64_t>();
+		table_names[row[0].ToString()] = TableListing::FromRow(row);
 	}
 	tables_listed = true;
 }
@@ -68,7 +84,7 @@ vector<string> OrkideaSchemaEntry::QueryTableNames(ClientContext &context, const
 	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
 	vector<string> found;
 	for (auto &row : QueryRows(context, connection, sql)) {
-		table_names[row[0].ToString()] = row[1].IsNull() ? -1 : row[1].GetValue<int64_t>();
+		table_names[row[0].ToString()] = TableListing::FromRow(row);
 		found.push_back(row[0].ToString());
 	}
 	return found;
@@ -105,7 +121,10 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::DescribeTable(ClientContext 
 	table->schema = name.GetIdentifierName();
 	table->name = oracle_name;
 	auto known = table_names.find(oracle_name);
-	table->estimated_rows = known == table_names.end() ? -1 : known->second;
+	if (known != table_names.end()) {
+		table->estimated_rows = known->second.estimated_rows;
+		table->splittable = known->second.splittable;
+	}
 
 	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
 	Statement statement(connection);
