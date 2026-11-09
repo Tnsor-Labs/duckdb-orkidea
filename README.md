@@ -57,6 +57,35 @@ In place of a secret name, both functions take an
 `oracle://user:password@host:port/service` URI. Prefer secrets: their
 passwords never show in `duckdb_secrets()` or in query text.
 
+### TNS names and wallets
+
+`CONNECT_STRING` takes a `tnsnames.ora` alias. The file is read from
+`CONFIG_DIR`, or from `$TNS_ADMIN` when `CONFIG_DIR` is not set; `IFILE`
+includes are followed.
+
+```sql
+CREATE SECRET sales (
+    TYPE orkidea,
+    CONNECT_STRING 'sales_prod', CONFIG_DIR '/etc/oracle',
+    USER 'scott', PASSWORD '...'
+);
+```
+
+A full descriptor works as well, without a file:
+
+```sql
+CREATE SECRET sales (
+    TYPE orkidea,
+    CONNECT_STRING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=SALES)))',
+    USER 'scott', PASSWORD '...'
+);
+```
+
+For Autonomous Database, unzip the wallet, point `CONFIG_DIR` and
+`WALLET_LOCATION` at it, and use one of the aliases in its `tnsnames.ora`
+(for example `mydb_high`). The driver reads the PEM wallet (`ewallet.pem`);
+`cwallet.sso` and `ewallet.p12` are not used.
+
 ## Secret parameters
 
 | Parameter | Description |
