@@ -58,8 +58,20 @@ endif()
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
-    src/orkidea_extension.cpp src/orkidea_adbc.cpp src/orkidea_execute.cpp
-    src/orkidea_query.cpp src/orkidea_secrets.cpp)
+    src/orkidea_extension.cpp
+    src/orkidea_adbc.cpp
+    src/orkidea_execute.cpp
+    src/orkidea_filter.cpp
+    src/orkidea_logging.cpp
+    src/orkidea_query.cpp
+    src/orkidea_scan.cpp
+    src/orkidea_secrets.cpp
+    src/orkidea_storage.cpp
+    src/orkidea_util.cpp
+    src/storage/orkidea_catalog.cpp
+    src/storage/orkidea_schema_entry.cpp
+    src/storage/orkidea_table_entry.cpp
+    src/storage/orkidea_transaction.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

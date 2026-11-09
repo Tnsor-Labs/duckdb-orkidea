@@ -75,6 +75,9 @@ public:
 	explicit StatementStream(unique_ptr<Statement> statement);
 	~StatementStream() override;
 
+	//! The next batch, or one with a null release callback at the end.
+	shared_ptr<ArrowArrayWrapper> GetNextChunk() override;
+
 private:
 	unique_ptr<Statement> statement;
 };

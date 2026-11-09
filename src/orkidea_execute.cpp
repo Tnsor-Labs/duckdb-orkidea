@@ -2,6 +2,7 @@
 
 #include "orkidea_adbc.hpp"
 #include "orkidea_secrets.hpp"
+#include "orkidea_util.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -46,7 +47,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &, TableFunctionIn
 
 //! Runs the statement on the first call, so that binding alone (EXPLAIN, a
 //! prepared statement) never runs it. The connection autocommits.
-void Execute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+void Execute(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &state = input.global_state->Cast<ExecuteState>();
 	if (state.done) {
 		return;
@@ -54,9 +55,7 @@ void Execute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	state.done = true;
 	auto &bind_data = input.bind_data->Cast<ExecuteBindData>();
 	auto connection = make_shared_ptr<Connection>(make_shared_ptr<Database>(bind_data.options));
-	Statement statement(connection);
-	statement.SetSqlQuery(bind_data.sql);
-	auto rows_affected = statement.ExecuteUpdate();
+	auto rows_affected = ExecuteStatement(context, std::move(connection), bind_data.sql);
 	output.data[0].Append(rows_affected < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(rows_affected));
 	output.CheckCardinality(1);
 }

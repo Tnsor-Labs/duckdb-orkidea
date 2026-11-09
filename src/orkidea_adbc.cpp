@@ -156,6 +156,15 @@ StatementStream::StatementStream(unique_ptr<Statement> statement_p) : statement(
 	statement->ExecuteQuery(arrow_array_stream);
 }
 
+shared_ptr<ArrowArrayWrapper> StatementStream::GetNextChunk() {
+	auto chunk = make_shared_ptr<ArrowArrayWrapper>();
+	if (arrow_array_stream.get_next(&arrow_array_stream, &chunk->arrow_array) != 0) {
+		auto message = arrow_array_stream.get_last_error(&arrow_array_stream);
+		throw IOException("Orkidea: reading rows failed: %s", message && *message ? message : "no further details");
+	}
+	return chunk;
+}
+
 StatementStream::~StatementStream() {
 	// The stream goes before the statement that produced it.
 	if (arrow_array_stream.release) {
