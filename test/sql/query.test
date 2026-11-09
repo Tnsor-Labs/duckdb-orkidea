@@ -1,0 +1,82 @@
+# name: test/sql/query.test
+# description: orkidea_query and orkidea_execute against a live Oracle database.
+# group: [sql]
+
+require orkidea
+
+# oracle://user:password@host:port/service of a database the tests may write to.
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+query ITR
+SELECT * FROM orkidea_query('ora', 'SELECT CAST(7 AS NUMBER(9)) AS n, ''hi'' AS s, CAST(1.25 AS NUMBER(10,2)) AS d FROM dual');
+----
+7	hi	1.25
+
+query TTT
+SELECT typeof(n), typeof(s), typeof(d) FROM orkidea_query('ora', 'SELECT CAST(7 AS NUMBER(9)) AS n, ''hi'' AS s, CAST(1.25 AS NUMBER(10,2)) AS d FROM dual');
+----
+INTEGER	VARCHAR	DECIMAL(10,2)
+
+# A URI works in place of a secret name.
+query I
+SELECT * FROM orkidea_query('{ORKIDEA_TEST_URI}', 'SELECT CAST(1 AS NUMBER(1)) FROM dual');
+----
+1
+
+statement ok
+SELECT * FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE ORKIDEA_DUCK_QUERY PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+query I
+SELECT * FROM orkidea_execute('ora', 'CREATE TABLE ORKIDEA_DUCK_QUERY (id NUMBER(10), name VARCHAR2(20), created TIMESTAMP)');
+----
+0
+
+query I
+SELECT * FROM orkidea_execute('ora', 'INSERT INTO ORKIDEA_DUCK_QUERY SELECT level, CASE WHEN MOD(level, 3) = 0 THEN NULL ELSE ''n'' || level END, TIMESTAMP ''2026-01-01 00:00:00'' + NUMTODSINTERVAL(level, ''HOUR'') FROM dual CONNECT BY level <= 10000');
+----
+10000
+
+query IIII
+SELECT count(*), count(NAME), sum(ID), max(CREATED) FROM orkidea_query('ora', 'SELECT * FROM ORKIDEA_DUCK_QUERY');
+----
+10000	6667	50005000	2027-02-21 16:00:00
+
+# Oracle names are case-insensitive in DuckDB, as any column name.
+query II
+SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM ORKIDEA_DUCK_QUERY WHERE id <= 3 ORDER BY id');
+----
+1	n1
+2	n2
+3	NULL
+
+# Binding alone never runs a statement.
+statement ok
+EXPLAIN SELECT * FROM orkidea_execute('ora', 'DROP TABLE ORKIDEA_DUCK_QUERY PURGE');
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT * FROM ORKIDEA_DUCK_QUERY');
+----
+10000
+
+statement error
+SELECT * FROM orkidea_query('ora', 'SELECT * FROM ORKIDEA_DUCK_NOT_THERE');
+----
+ORA-00942
+
+statement error
+SELECT * FROM orkidea_query('ora', 'BEGIN NULL; END;');
+----
+returns no rows; run it with orkidea_execute
+
+statement error
+SELECT * FROM orkidea_execute('ora', 'INSERT INTO ORKIDEA_DUCK_QUERY (id) VALUES (''x'')');
+----
+ORA-01722
+
+query I
+SELECT * FROM orkidea_execute('ora', 'DROP TABLE ORKIDEA_DUCK_QUERY PURGE');
+----
+0

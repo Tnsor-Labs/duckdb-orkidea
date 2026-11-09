@@ -1,102 +1,119 @@
-# Quack
+# Orkidea for DuckDB
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+A DuckDB extension for Oracle Database, built on the
+[Orkidea ADBC driver](https://github.com/Tnsor-Labs/orkidea-adbc). It is not
+affiliated with, sponsored by, or endorsed by Oracle Corporation.
 
----
+**Status:** in development. It is not yet in the DuckDB community extensions
+repository, and its SQL interface may change before the first release.
 
-This extension, Quack, allow you to ... <extension_goal>.
+- No Oracle Instant Client, OCI, or ODBC: the driver speaks Oracle's network
+  protocol itself and is linked into the extension.
+- Results stream into DuckDB as Arrow record batches, with exact types:
+  `NUMBER(p,s)` as `DECIMAL(p,s)`, `TIMESTAMP WITH TIME ZONE` as
+  `TIMESTAMPTZ`, `DATE` as `TIMESTAMP_S`, LOBs, `RAW`, intervals, `BOOLEAN`,
+  `JSON` as `JSON`, and `VECTOR` as a fixed-size array.
+- Targets DuckDB v2.0.0 on Linux, macOS, and Windows, on x86_64 and arm64.
 
+## Usage
+
+Store the connection in a secret:
+
+```sql
+LOAD orkidea;
+
+CREATE SECRET ora (
+    TYPE orkidea,
+    HOST 'db.example.com', PORT 1521, SERVICE 'FREEPDB1',
+    USER 'scott', PASSWORD '...'
+);
+```
+
+Run a query on Oracle and use its rows like any table:
+
+```sql
+SELECT * FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = 10');
+
+CREATE TABLE emp AS FROM orkidea_query('ora', 'SELECT * FROM emp');
+```
+
+Quote Oracle SQL that contains quotes with `$$`:
+
+```sql
+FROM orkidea_query('ora', $$SELECT ename FROM emp WHERE job = 'CLERK'$$);
+```
+
+Run DDL, DML, or PL/SQL. The result is the number of rows affected:
+
+```sql
+FROM orkidea_execute('ora', 'UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10');
+```
+
+Each call opens its own connection, which commits on success.
+`orkidea_execute` runs when the query executes, never when it is only bound,
+so `EXPLAIN` and prepared statements don't run it.
+
+In place of a secret name, both functions take an
+`oracle://user:password@host:port/service` URI. Prefer secrets: their
+passwords never show in `duckdb_secrets()` or in query text.
+
+## Secret parameters
+
+| Parameter | Description |
+| --- | --- |
+| `HOST`, `PORT`, `SERVICE` | Where to connect, as the Easy Connect string `host:port/service`. |
+| `PROTOCOL` | `TCP` (default), or `TCPS` for TLS. |
+| `CONNECT_STRING` | In place of `HOST`: an Easy Connect string, a full TNS descriptor, or a `tnsnames.ora` alias. |
+| `URI` | In place of the above: `oracle://user:password@host:port/service` or `oracle+tcps://...`. |
+| `USER` (or `USERNAME`), `PASSWORD` | Credentials. They override those in `URI`. |
+| `CONFIG_DIR` | Directory with `tnsnames.ora`. Defaults to `$TNS_ADMIN`. |
+| `WALLET_LOCATION`, `WALLET_PASSWORD` | PEM wallet (`ewallet.pem`) for TLS and mutual TLS, as for Autonomous Database. |
+| `AUTH_MODE` | Privileged connection: `SYSDBA`, `SYSOPER`, and so on. |
+| `CONNECT_TIMEOUT_MS`, `CALL_TIMEOUT_MS` | Network connect timeout, and timeout per round trip. |
+| `STMT_CACHE_SIZE` | Statement cache size (default 20). |
+| `TIME_ZONE` | Session time zone, which determines how `TIMESTAMP WITH LOCAL TIME ZONE` values read. |
+| `EDITION` | Edition for edition-based redefinition. |
+
+`PASSWORD`, `WALLET_PASSWORD`, and `URI` are redacted in `duckdb_secrets()`.
+Connecting is refused when `enable_external_access` is off.
+
+Types map as in the driver; see its
+[type support](https://github.com/Tnsor-Labs/orkidea-adbc/blob/main/docs/type-support.md).
 
 ## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-### Build steps
-Now to build the extension, run:
+You need CMake, Ninja, a C++17 compiler, and Rust 1.89 or newer. Corrosion
+builds the driver from `rust/` and links it into the extension.
+
 ```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/quack/quack.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `quack.duckdb_extension` is the loadable binary as it would be distributed.
-
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
-
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `quack()` that takes a string arguments and returns a string:
-```
-D select quack('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Quack Jane 🐥 │
-└───────────────┘
+git clone --recurse-submodules https://github.com/Tnsor-Labs/duckdb-orkidea
+cd duckdb-orkidea
+GEN=ninja make release
 ```
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
+This builds `build/release/duckdb` with the extension linked in, and the
+loadable `build/release/extension/orkidea/orkidea.duckdb_extension`.
+
+## Testing
+
 ```sh
 make test
 ```
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+The tests in `test/sql/query.test` run only with a database they may create
+tables in:
 
-CLI:
-```shell
-duckdb -unsigned
+```sh
+ORKIDEA_TEST_URI=oracle://user:password@localhost:1521/FREEPDB1 make test
 ```
 
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
+## Updating DuckDB
 
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
+Move the `duckdb` submodule to the new release tag, `extension-ci-tools` to
+its matching branch, and the versions in
+`.github/workflows/MainDistributionPipeline.yml` to match. Extensions build
+against DuckDB's internal C++ API, which can change between releases.
 
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
+## License
 
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL quack;
-LOAD quack;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+Apache License 2.0. See [LICENSE](LICENSE).

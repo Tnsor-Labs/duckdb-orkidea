@@ -51,7 +51,9 @@ corrosion_import_crate(
 
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/orkidea_extension.cpp)
+set(EXTENSION_SOURCES
+    src/orkidea_extension.cpp src/orkidea_adbc.cpp src/orkidea_execute.cpp
+    src/orkidea_query.cpp src/orkidea_secrets.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
