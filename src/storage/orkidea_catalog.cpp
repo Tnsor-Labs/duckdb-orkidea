@@ -1,12 +1,16 @@
 #include "storage/orkidea_catalog.hpp"
 
 #include "orkidea_insert.hpp"
+#include "orkidea_modify.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_schema_entry.hpp"
 #include "storage/orkidea_transaction.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/planner/operator/logical_alter.hpp"
 #include "duckdb/storage/database_size.hpp"
 
 namespace duckdb {
@@ -17,9 +21,6 @@ namespace {
 //! Every connection compares strings byte by byte, as DuckDB does, so that
 //! filters pushed into Oracle select the same rows.
 constexpr const char *SESSION_SETUP = "ALTER SESSION SET NLS_COMP = BINARY NLS_SORT = BINARY";
-
-constexpr const char *WRITES_NOT_SUPPORTED =
-    "UPDATE and DELETE on an attached Oracle database are not supported yet; use orkidea_execute";
 
 } // namespace
 
@@ -176,14 +177,14 @@ PhysicalOperator &OrkideaCatalog::PlanInsert(ClientContext &context, PhysicalPla
 	return OrkideaInsert::PlanInsert(context, planner, op, plan);
 }
 
-PhysicalOperator &OrkideaCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
-                                             PhysicalOperator &) {
-	throw NotImplementedException(WRITES_NOT_SUPPORTED);
+PhysicalOperator &OrkideaCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
+                                             PhysicalOperator &plan) {
+	return OrkideaModify::PlanDelete(context, planner, op, plan);
 }
 
-PhysicalOperator &OrkideaCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,
-                                             PhysicalOperator &) {
-	throw NotImplementedException(WRITES_NOT_SUPPORTED);
+PhysicalOperator &OrkideaCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
+                                             PhysicalOperator &plan) {
+	return OrkideaModify::PlanUpdate(context, planner, op, plan);
 }
 
 void OrkideaCatalog::ForgetTable(const string &schema, const string &table) {
@@ -192,6 +193,13 @@ void OrkideaCatalog::ForgetTable(const string &schema, const string &table) {
 	if (entry != schemas.end()) {
 		entry->second->ForgetTable(table);
 	}
+}
+
+unique_ptr<LogicalOperator> OrkideaCatalog::BindAlterAddIndex(Binder &, TableCatalogEntry &,
+                                                              unique_ptr<LogicalOperator>, unique_ptr<CreateIndexInfo>,
+                                                              unique_ptr<AlterTableInfo> alter_info) {
+	unique_ptr<AlterInfo> info = std::move(alter_info);
+	return make_uniq<LogicalAlter>(std::move(info));
 }
 
 DatabaseSize OrkideaCatalog::GetDatabaseSize(ClientContext &) {

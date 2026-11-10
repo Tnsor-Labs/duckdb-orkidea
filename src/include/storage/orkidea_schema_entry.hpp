@@ -24,6 +24,8 @@ struct TableListing {
 	int64_t estimated_rows = -1;
 	//! Whether several sessions can read it in ROWID ranges.
 	bool splittable = false;
+	//! Whether its rows have ROWIDs (a table that is not index-organized).
+	bool has_rowid = false;
 
 	static TableListing FromRow(const vector<Value> &row);
 };
@@ -68,6 +70,8 @@ private:
 	optional_ptr<OrkideaTableEntry> DescribeTable(ClientContext &context, const string &oracle_name);
 	//! Drops a table in Oracle and from the cache. The lock must be held.
 	void DropTable(ClientContext &context, OrkideaTableEntry &table, bool purge);
+	//! Removes a table from the cache, keeping its entry alive. The lock must be held.
+	void Retire(const string &oracle_name);
 
 	mutex lock;
 	bool tables_listed = false;
@@ -75,6 +79,8 @@ private:
 	unordered_map<string, TableListing> table_names;
 	//! Described tables, keyed by Oracle name.
 	unordered_map<string, unique_ptr<OrkideaTableEntry>> tables;
+	//! Entries of tables dropped or altered since, which statements may still use.
+	vector<unique_ptr<OrkideaTableEntry>> retired;
 };
 
 } // namespace orkidea

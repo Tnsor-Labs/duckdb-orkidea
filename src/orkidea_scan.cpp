@@ -4,6 +4,7 @@
 #include "orkidea_partition.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_catalog.hpp"
+#include "storage/orkidea_table_entry.hpp"
 #include "storage/orkidea_transaction.hpp"
 
 #include "duckdb/execution/expression_executor.hpp"
@@ -37,18 +38,23 @@ FilterColumn MakeFilterColumn(const OracleTable &table, column_t column, bool un
 }
 
 //! Plans `SELECT <scanned columns> FROM <table> WHERE <translated filters>`.
-//! A row id that DuckDB scans (for COUNT(*), for example) has no Oracle
-//! column, so a NULL stands in for it and keeps the result columns aligned.
+//! The row id is the ROWID as text. Other virtual columns, such as the empty
+//! column DuckDB scans for COUNT(*), have no Oracle column, so a NULL stands
+//! in for them and keeps the result columns aligned.
 //! With `order_by` and `row_limit`, the first rows in that order. `source` is
 //! the FROM clause (the table, or the table AS OF a change number), and
 //! `range` an extra condition (a ROWID range).
 ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<column_t> &column_ids,
                   optional_ptr<TableFilterSet> filters, const vector<ScanOrder> &order_by = {},
                   optional_idx row_limit = optional_idx(), const string &source = string(),
-                  const string &range = string()) {
+                  const string &range = string(), bool for_update = false) {
 	vector<string> select_list;
 	for (auto column : column_ids) {
-		select_list.push_back(IsVirtualColumn(column) ? "NULL" : QuoteIdentifier(table.column_names[column]));
+		if (column == COLUMN_IDENTIFIER_ROW_ID) {
+			select_list.emplace_back("ROWIDTOCHAR(ROWID)");
+		} else {
+			select_list.push_back(IsVirtualColumn(column) ? "NULL" : QuoteIdentifier(table.column_names[column]));
+		}
 	}
 	if (select_list.empty()) {
 		select_list.emplace_back("NULL");
@@ -92,6 +98,9 @@ ScanPlan PlanScan(const OracleTable &table, bool unicode_database, const vector<
 	}
 	if (row_limit.IsValid()) {
 		plan.sql += " FETCH FIRST " + to_string(row_limit.GetIndex()) + " ROWS ONLY";
+	}
+	if (for_update) {
+		plan.sql += " FOR UPDATE";
 	}
 	return plan;
 }
@@ -162,6 +171,9 @@ struct TableScanGlobalState : public ArrowScanGlobalState {
 //! DuckDB's Arrow scan state, and an executor for each local filter.
 struct TableScanLocalState : public LocalTableFunctionState {
 	unique_ptr<ArrowScanLocalState> arrow;
+	//! The scanned columns. DuckDB's Arrow conversion sees every virtual one
+	//! as the row id, which it leaves out, and the scan fills them itself.
+	vector<column_t> column_ids;
 	//! The range this thread is reading, when the scan reads ranges, its
 	//! index, and how many of its batches the thread has read.
 	unique_ptr<StatementStream> range;
@@ -172,10 +184,10 @@ struct TableScanLocalState : public LocalTableFunctionState {
 
 //! How many sessions a scan of the table should use: 1 for a single stream.
 idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data) {
-	// A pushed LIMIT or order needs one ordered stream, and rows a
-	// transaction wrote are seen only by its own session.
+	// A pushed LIMIT or order needs one ordered stream; rows a transaction
+	// wrote, and rows it locks, belong to its own session.
 	if (!bind_data.table->splittable || bind_data.row_limit.IsValid() || !bind_data.order_by.empty() ||
-	    OrkideaTransaction::Get(context, bind_data.catalog).HasWritten()) {
+	    bind_data.for_update || OrkideaTransaction::Get(context, bind_data.catalog).HasWritten()) {
 		return 1;
 	}
 	Value setting;
@@ -269,24 +281,33 @@ bool NextRangeBatch(ClientContext &context, const TableScanBindData &bind_data, 
 
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
+	// Rows read FOR UPDATE stay locked only if the session does not commit
+	// after the query, so the scan opens the transaction for writing.
+	bool for_update = bind_data.for_update && !bind_data.row_limit.IsValid() && bind_data.order_by.empty();
 	auto plan = PlanScan(*bind_data.table, bind_data.catalog.GetDatabaseInfo().unicode, input.column_ids,
-	                     input.filters.get(), bind_data.order_by, bind_data.row_limit);
+	                     input.filters.get(), bind_data.order_by, bind_data.row_limit, string(), string(), for_update);
 
 	auto result = make_uniq<TableScanGlobalState>();
 	result->local_filters = std::move(plan.local_filters);
 	auto sessions = ScanSessions(context, bind_data);
 	if (sessions < 2 || !PlanRanges(context, bind_data, input, sessions, *result)) {
 		// One stream feeds every thread; threads convert its batches in parallel.
-		result->stream =
-		    OpenQuery(context, OrkideaTransaction::Get(context, bind_data.catalog).GetConnection(), plan.sql);
+		auto &transaction = OrkideaTransaction::Get(context, bind_data.catalog);
+		auto connection = for_update ? transaction.GetWriteConnection() : transaction.GetConnection();
+		result->stream = OpenQuery(context, std::move(connection), plan.sql);
 		result->max_threads = context.db->NumberOfThreads();
 	}
 	// Columns only filters need are scanned, then left out of the output.
 	if (!input.projection_ids.empty()) {
 		result->projection_ids = input.projection_ids;
 		for (auto column : input.column_ids) {
-			result->scanned_types.push_back(IsVirtualColumn(column) ? LogicalType::ROW_TYPE
-			                                                        : bind_data.all_types[column]);
+			if (column == COLUMN_IDENTIFIER_ROW_ID) {
+				result->scanned_types.push_back(LogicalType::VARCHAR);
+			} else if (IsVirtualColumn(column)) {
+				result->scanned_types.push_back(LogicalType::BOOLEAN);
+			} else {
+				result->scanned_types.push_back(bind_data.all_types[column]);
+			}
 		}
 	}
 	return std::move(result);
@@ -310,6 +331,14 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
 			result->arrow = unique_ptr_cast<LocalTableFunctionState, ArrowScanLocalState>(std::move(arrow));
 		}
 	}
+	result->column_ids = input.column_ids;
+	if (result->arrow) {
+		for (auto &column : result->arrow->column_ids) {
+			if (IsVirtualColumn(column)) {
+				column = COLUMN_IDENTIFIER_ROW_ID;
+			}
+		}
+	}
 	for (auto &filter : global.local_filters) {
 		result->filters.emplace_back(filter.first, make_uniq<ExpressionExecutor>(context.client, *filter.second));
 	}
@@ -330,6 +359,43 @@ void ApplyLocalFilters(TableScanLocalState &state, DataChunk &scanned) {
 		}
 		if (scanned.size() == 0) {
 			return;
+		}
+	}
+}
+
+//! Fills the virtual columns of a batch, which DuckDB's Arrow conversion
+//! leaves out: the row id from the ROWIDs, which Oracle sends as text
+//! (ROWIDTOCHAR) in an Arrow string array, and any other with NULL.
+void ConvertVirtualColumns(const TableScanLocalState &state, idx_t count, DataChunk &scanned) {
+	auto &arrow = *state.arrow;
+	for (idx_t column = 0; column < state.column_ids.size(); column++) {
+		if (!IsVirtualColumn(state.column_ids[column])) {
+			continue;
+		}
+		if (state.column_ids[column] != COLUMN_IDENTIFIER_ROW_ID) {
+			scanned.data[column].SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(scanned.data[column], true);
+			continue;
+		}
+		auto &array = *arrow.chunk->arrow_array.children[column];
+		if (array.n_buffers != 3) {
+			throw InternalException("orkidea_scan: ROWIDs did not arrive as a string array");
+		}
+		auto validity = static_cast<const uint8_t *>(array.buffers[0]);
+		auto offsets = static_cast<const int32_t *>(array.buffers[1]);
+		auto data = static_cast<const char *>(array.buffers[2]);
+		auto &vector = scanned.data[column];
+		vector.SetVectorType(VectorType::FLAT_VECTOR);
+		auto strings = FlatVector::GetDataMutable<string_t>(vector);
+		auto start = NumericCast<idx_t>(arrow.chunk->arrow_array.offset + array.offset) + arrow.chunk_offset;
+		for (idx_t row = 0; row < count; row++) {
+			auto index = start + row;
+			if (validity && !(validity[index / 8] & (1 << (index % 8)))) {
+				FlatVector::SetNull(vector, row, true);
+				continue;
+			}
+			auto length = NumericCast<uint32_t>(offsets[index + 1] - offsets[index]);
+			strings[row] = StringVector::AddString(vector, data + offsets[index], length);
 		}
 	}
 }
@@ -361,6 +427,7 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		scanned.Reset();
 		scanned.SetChildCardinality(count);
 		ArrowTableFunction::ArrowToDuckDB(arrow, bind_data.arrow_table.GetColumns(), scanned);
+		ConvertVirtualColumns(state, count, scanned);
 		arrow.chunk_offset += count;
 		ApplyLocalFilters(state, scanned);
 		// An empty chunk would end the scan, so a batch whose rows were all
@@ -374,6 +441,10 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		output.Verify(context);
 		return;
 	}
+}
+
+optional_ptr<TableCatalogEntry> TableEntry(optional_ptr<const FunctionData> bind_data) {
+	return &bind_data->Cast<TableScanBindData>().entry;
 }
 
 OperatorPartitionData PartitionData(ClientContext &, TableFunctionGetPartitionInput &input) {
@@ -415,8 +486,9 @@ unique_ptr<NodeStatistics> Cardinality(ClientContext &, const FunctionData *bind
 
 } // namespace
 
-TableScanBindData::TableScanBindData(OrkideaCatalog &catalog_p, shared_ptr<const OracleTable> table_p)
-    : ArrowScanFunctionData(make_shared_ptr<TableScanFactory>(catalog_p, table_p)), catalog(catalog_p),
+TableScanBindData::TableScanBindData(OrkideaCatalog &catalog_p, OrkideaTableEntry &entry_p,
+                                     shared_ptr<const OracleTable> table_p)
+    : ArrowScanFunctionData(make_shared_ptr<TableScanFactory>(catalog_p, table_p)), catalog(catalog_p), entry(entry_p),
       table(std::move(table_p)) {
 }
 
@@ -449,9 +521,9 @@ bool TableScan::HasLocalFilters(const LogicalGet &get) {
 	return false;
 }
 
-TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalog, shared_ptr<const OracleTable> table,
-                                  unique_ptr<FunctionData> &bind_data) {
-	auto result = make_uniq<TableScanBindData>(catalog, std::move(table));
+TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalog, OrkideaTableEntry &entry,
+                                  shared_ptr<const OracleTable> table, unique_ptr<FunctionData> &bind_data) {
+	auto result = make_uniq<TableScanBindData>(catalog, entry, std::move(table));
 	result->factory->GetSchema(result->schema_root.arrow_schema);
 	ArrowTableFunction::PopulateArrowTableSchema(context, result->arrow_table, result->schema_root.arrow_schema);
 	result->all_types = result->arrow_table.GetTypes();
@@ -465,6 +537,7 @@ TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalo
 	function.supports_pushdown_type = SupportsPushdownType;
 	function.cardinality = Cardinality;
 	function.get_partition_data = PartitionData;
+	function.get_table_entry = TableEntry;
 	return function;
 }
 

@@ -20,6 +20,7 @@ class ExtensionLoader;
 namespace orkidea {
 
 class OrkideaCatalog;
+class OrkideaTableEntry;
 
 //! A sort key of a top-N pushed into the scan.
 struct ScanOrder {
@@ -30,23 +31,30 @@ struct ScanOrder {
 };
 
 struct TableScanBindData : public ArrowScanFunctionData {
-	TableScanBindData(OrkideaCatalog &catalog, shared_ptr<const OracleTable> table);
+	TableScanBindData(OrkideaCatalog &catalog, OrkideaTableEntry &entry, shared_ptr<const OracleTable> table);
 
 	OrkideaCatalog &catalog;
+	//! The catalog entry scanned, which DuckDB asks for to bind the table's
+	//! virtual columns (rowid) and to match UPDATE and DELETE to their scan.
+	OrkideaTableEntry &entry;
 	shared_ptr<const OracleTable> table;
 	//! The most rows the query needs from the scan (FETCH FIRST), set when a
 	//! LIMIT or top-N directly above it allows. DuckDB still applies its own.
 	optional_idx row_limit;
 	//! The order to fetch rows in, for a top-N.
 	vector<ScanOrder> order_by;
+	//! Set for the scan that finds the rows an UPDATE or DELETE changes: it
+	//! reads FOR UPDATE, in the writing transaction, so that the rows are
+	//! locked from the moment they are read until the transaction ends.
+	bool for_update = false;
 };
 
 struct TableScan {
 	static constexpr const char *NAME = "orkidea_scan";
 
 	//! The scan function and its bind data for a table.
-	static TableFunction Function(ClientContext &context, OrkideaCatalog &catalog, shared_ptr<const OracleTable> table,
-	                              unique_ptr<FunctionData> &bind_data);
+	static TableFunction Function(ClientContext &context, OrkideaCatalog &catalog, OrkideaTableEntry &entry,
+	                              shared_ptr<const OracleTable> table, unique_ptr<FunctionData> &bind_data);
 	//! The settings that control parallel scans.
 	static void RegisterSettings(ExtensionLoader &loader);
 	//! Whether DuckDB must evaluate any of the scan's filters itself, which

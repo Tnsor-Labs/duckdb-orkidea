@@ -35,13 +35,16 @@ string DisplayPath(const string &target) {
 DatabaseInfo ReadDatabaseInfo(ClientContext &context, ConnectionPool &pool) {
 	auto rows = QueryRows(context, pool.Acquire(),
 	                      "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'),"
-	                      " (SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET')"
+	                      " (SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET'),"
+	                      " (SELECT REGEXP_SUBSTR(version, '^[0-9]+') FROM product_component_version"
+	                      "   WHERE product LIKE 'Oracle%' AND ROWNUM = 1)"
 	                      " FROM dual");
 	DatabaseInfo info;
 	info.current_schema = rows[0][0].ToString();
 	auto charset = rows[0][1].IsNull() ? string() : rows[0][1].ToString();
 	info.unicode = charset == "AL32UTF8" || charset == "UTF8";
 	info.utf8_byte_order = charset == "AL32UTF8";
+	info.major_version = rows[0][2].IsNull() ? 0 : std::stoull(rows[0][2].ToString());
 	return info;
 }
 

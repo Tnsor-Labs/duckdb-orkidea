@@ -1,5 +1,6 @@
 #include "orkidea_insert.hpp"
 
+#include "orkidea_modify.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_catalog.hpp"
 #include "storage/orkidea_table_entry.hpp"
@@ -7,7 +8,13 @@
 
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
@@ -25,11 +32,42 @@ struct CollectionStreamData {
 	    : collection(collection), names(std::move(names_p)), properties(context.GetClientProperties()) {
 	}
 
+	//! Sets up the scan of `column_ids` (all when empty), and the output with
+	//! `null_types` placeholder columns after them.
+	void Initialize(Allocator &allocator, const vector<column_t> &column_ids, const vector<LogicalType> &null_types) {
+		if (column_ids.empty()) {
+			collection.InitializeScan(scan);
+		} else {
+			collection.InitializeScan(scan, column_ids);
+		}
+		collection.InitializeScanChunk(scan, chunk);
+		auto types = chunk.GetTypes();
+		types.insert(types.end(), null_types.begin(), null_types.end());
+		// Allocated, not empty: the NULL columns need buffers for the Arrow export.
+		output.Initialize(allocator, types);
+	}
+
+	//! The next chunk of the collection, with its placeholder columns.
+	DataChunk &Next() {
+		chunk.Reset();
+		collection.Scan(scan, chunk);
+		for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+			output.data[c].Reference(chunk.data[c]);
+		}
+		for (idx_t c = chunk.ColumnCount(); c < output.ColumnCount(); c++) {
+			output.data[c].SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(output.data[c], true);
+		}
+		output.SetCardinalityUnsafe(chunk.size());
+		return output;
+	}
+
 	ColumnDataCollection &collection;
 	vector<string> names;
 	ClientProperties properties;
 	ColumnDataScanState scan;
 	DataChunk chunk;
+	DataChunk output;
 	string error;
 };
 
@@ -40,7 +78,7 @@ CollectionStreamData &StreamData(ArrowArrayStream *stream) {
 int GetSchema(ArrowArrayStream *stream, ArrowSchema *out) {
 	auto &data = StreamData(stream);
 	try {
-		ArrowConverter::ToArrowSchema(out, data.chunk.GetTypes(), data.names, data.properties);
+		ArrowConverter::ToArrowSchema(out, data.output.GetTypes(), data.names, data.properties);
 		return 0;
 	} catch (std::exception &ex) {
 		data.error = ex.what();
@@ -51,13 +89,12 @@ int GetSchema(ArrowArrayStream *stream, ArrowSchema *out) {
 int GetNext(ArrowArrayStream *stream, ArrowArray *out) {
 	auto &data = StreamData(stream);
 	try {
-		data.chunk.Reset();
-		data.collection.Scan(data.scan, data.chunk);
-		if (data.chunk.size() == 0) {
+		auto &chunk = data.Next();
+		if (chunk.size() == 0) {
 			out->release = nullptr;
 			return 0;
 		}
-		ArrowConverter::ToArrowArray(data.chunk, out, data.properties, {});
+		ArrowConverter::ToArrowArray(chunk, out, data.properties, {});
 		return 0;
 	} catch (std::exception &ex) {
 		data.error = ex.what();
@@ -75,17 +112,43 @@ void Release(ArrowArrayStream *stream) {
 	stream->release = nullptr;
 }
 
-//! How an Oracle column takes part in an insert.
-enum class ColumnRole {
-	//! Always sent.
-	VALUE,
-	//! Has a default or is an identity column: left out of a batch in which
-	//! it is NULL in every row, which is what an INSERT that does not name it
-	//! gives, so that Oracle fills it in.
-	DEFAULTED,
-	//! A virtual column, which Oracle computes: never sent.
-	VIRTUAL,
-};
+void OracleDefaultFunction(DataChunk &, ExpressionState &, Vector &result) {
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::SetNull(result, true);
+}
+
+} // namespace
+
+void OracleDefault::Register(ExtensionLoader &loader) {
+	ScalarFunction function(NAME, {}, LogicalType::SQLNULL, OracleDefaultFunction);
+	// Never folded into a NULL constant, which would hide it.
+	function.SetVolatile();
+	loader.RegisterFunction(function);
+}
+
+unique_ptr<ParsedExpression> OracleDefault::Create() {
+	return make_uniq<FunctionExpression>(NAME, vector<unique_ptr<ParsedExpression>>());
+}
+
+bool OracleDefault::Is(const Expression &expr) {
+	if (BoundCastExpression::IsCast(expr)) {
+		return Is(BoundCastExpression::Child(expr.Cast<BoundFunctionExpression>()));
+	}
+	return expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
+	       expr.Cast<BoundFunctionExpression>().Function().GetName() == NAME;
+}
+
+vector<bool> OracleDefault::Columns(const PhysicalOperator &plan) {
+	vector<bool> result(plan.GetTypes().size(), false);
+	if (plan.type != PhysicalOperatorType::PROJECTION) {
+		return result;
+	}
+	auto &projection = plan.Cast<PhysicalProjection>();
+	for (idx_t c = 0; c < projection.select_list.size() && c < result.size(); c++) {
+		result[c] = Is(*projection.select_list[c]);
+	}
+	return result;
+}
 
 vector<ColumnRole> ReadColumnRoles(ClientContext &context, shared_ptr<Connection> connection,
                                    const OracleTable &table) {
@@ -111,6 +174,8 @@ vector<ColumnRole> ReadColumnRoles(ClientContext &context, shared_ptr<Connection
 	}
 	return roles;
 }
+
+namespace {
 
 class InsertGlobalState : public GlobalSinkState {
 public:
@@ -170,15 +235,8 @@ public:
 			                              "least one column of %s",
 			                              oracle_table.name);
 		}
-		auto data = make_uniq<CollectionStreamData>(context, *buffer, std::move(names));
-		buffer->InitializeScan(data->scan, sent);
-		buffer->InitializeScanChunk(data->scan, data->chunk);
 		ArrowArrayStream stream;
-		stream.get_schema = GetSchema;
-		stream.get_next = GetNext;
-		stream.get_last_error = GetLastError;
-		stream.release = Release;
-		stream.private_data = data.release();
+		CollectionStream(context, *buffer, std::move(names), stream, sent);
 
 		Statement statement(connection);
 		statement.SetOption(ADBC_INGEST_OPTION_TARGET_TABLE, QuoteIdentifier(oracle_table.name));
@@ -205,10 +263,9 @@ public:
 } // namespace
 
 void CollectionStream(ClientContext &context, ColumnDataCollection &collection, vector<string> names,
-                      ArrowArrayStream &stream) {
+                      ArrowArrayStream &stream, vector<column_t> column_ids, vector<LogicalType> null_types) {
 	auto data = make_uniq<CollectionStreamData>(context, collection, std::move(names));
-	collection.InitializeScan(data->scan);
-	collection.InitializeScanChunk(data->scan, data->chunk);
+	data->Initialize(Allocator::Get(context), column_ids, null_types);
 	stream.get_schema = GetSchema;
 	stream.get_next = GetNext;
 	stream.get_last_error = GetLastError;
@@ -216,8 +273,10 @@ void CollectionStream(ClientContext &context, ColumnDataCollection &collection, 
 	stream.private_data = data.release();
 }
 
-OrkideaInsert::OrkideaInsert(PhysicalPlan &plan, LogicalOperator &op, OrkideaTableEntry &table_p)
-    : PhysicalOperator(plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table_p) {
+OrkideaInsert::OrkideaInsert(PhysicalPlan &plan, LogicalOperator &op, OrkideaTableEntry &table_p,
+                             vector<bool> omitted_p)
+    : PhysicalOperator(plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table_p),
+      omitted(std::move(omitted_p)) {
 }
 
 OrkideaInsert::OrkideaInsert(PhysicalPlan &plan, LogicalOperator &op, SchemaCatalogEntry &schema_p,
@@ -229,6 +288,11 @@ unique_ptr<GlobalSinkState> OrkideaInsert::GetGlobalSinkState(ClientContext &con
 	if (table) {
 		auto connection = OrkideaTransaction::Get(context, table.get_mutable()->ParentCatalog()).GetConnection();
 		auto roles = ReadColumnRoles(context, connection, table->GetOracleTable());
+		for (idx_t c = 0; c < omitted.size() && c < roles.size(); c++) {
+			if (omitted[c]) {
+				roles[c] = ColumnRole::OMITTED;
+			}
+		}
 		return make_uniq<InsertGlobalState>(context, *table.get_mutable(), std::move(roles),
 		                                    children[0].get().GetTypes());
 	}
@@ -266,18 +330,18 @@ InsertionOrderPreservingMap<string> OrkideaInsert::ParamsToString() const {
 	return result;
 }
 
-PhysicalOperator &OrkideaInsert::PlanInsert(ClientContext &, PhysicalPlanGenerator &planner, LogicalInsert &op,
+PhysicalOperator &OrkideaInsert::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                             optional_ptr<PhysicalOperator> plan) {
-	if (op.return_chunk) {
-		throw NotImplementedException("INSERT ... RETURNING is not supported for Oracle tables");
-	}
 	if (op.on_conflict_info.action_type != OnConflictAction::THROW) {
-		throw NotImplementedException("INSERT ... ON CONFLICT is not supported for Oracle tables");
+		throw NotImplementedException("This form of INSERT ... ON CONFLICT is not supported for Oracle tables");
 	}
 	if (!plan) {
 		throw NotImplementedException("INSERT ... DEFAULT VALUES is not supported for Oracle tables");
 	}
-	auto &insert = planner.Make<OrkideaInsert>(op, op.table.Cast<OrkideaTableEntry>());
+	if (op.return_chunk) {
+		return OrkideaModify::PlanInsertReturning(context, planner, op, *plan);
+	}
+	auto &insert = planner.Make<OrkideaInsert>(op, op.table.Cast<OrkideaTableEntry>(), OracleDefault::Columns(*plan));
 	insert.children.push_back(*plan);
 	return insert;
 }

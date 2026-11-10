@@ -138,8 +138,50 @@ statement rolls back every row it inserted.
   table created in a transaction that rolls back is dropped again. A dropped
   table goes to Oracle's recycle bin (`FLASHBACK TABLE ... TO BEFORE DROP`
   restores it); `DROP` is not undone by `ROLLBACK`.
-- **Not supported yet:** `UPDATE`, `DELETE`, `INSERT ... RETURNING`,
-  `ON CONFLICT`, `DEFAULT VALUES`, and `ALTER TABLE`. Use `orkidea_execute`.
+
+#### Updating, deleting, and upserting
+
+```sql
+UPDATE oracle.items SET price = price * 1.1 WHERE category = 'tea';
+DELETE FROM oracle.items WHERE discontinued RETURNING id, name;
+INSERT INTO oracle.items (id, name) VALUES (7, 'mate') RETURNING *;   -- with Oracle's defaults and identity values
+INSERT INTO oracle.items VALUES (7, 'mate', 4.0) ON CONFLICT (id) DO UPDATE SET price = excluded.price;
+MERGE INTO oracle.items t USING 'prices.parquet' s ON t.id = s.id
+    WHEN MATCHED THEN UPDATE SET price = s.price WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.name, s.price);
+```
+
+- **Rows are found by ROWID.** `rowid` on an attached table is the Oracle
+  ROWID as text (`AAAS6/AAYAAAPpVAAA`). The scan that finds the rows an
+  `UPDATE` or `DELETE` changes reads them `FOR UPDATE`, so they are locked
+  from that moment until the transaction ends, and the changes go to Oracle
+  as array DML (`UPDATE ... WHERE ROWID = :1`), many rows per round trip.
+  DuckDB computes the new values, so any DuckDB expression works in `SET`.
+  Views and index-organized tables have no ROWIDs, and cannot be updated or
+  deleted from this way; use `orkidea_execute`.
+- **`DEFAULT`** means Oracle's default: `SET col = DEFAULT` and the columns
+  an `INSERT` leaves out are filled by Oracle. (DuckDB shows every Oracle
+  column's default as `orkidea_oracle_default()`.)
+- **`RETURNING`** uses Oracle's own `RETURNING ... INTO`, so it returns the
+  rows as Oracle stored them: identity values, defaults, and the results of
+  triggers. It runs the statement once per row, so it suits hundreds or
+  thousands of rows better than millions.
+- **`ON CONFLICT`** and **`MERGE INTO`** work through the table's primary
+  key and unique constraints, as DuckDB plans them: DuckDB joins the new rows
+  with the table, then inserts or updates. Unlike Oracle's own `MERGE`, two
+  sessions inserting the same new key at once make one of them fail with a
+  unique-constraint error.
+
+#### Changing tables
+
+`ALTER TABLE` supports `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` (with a
+constant default), `DROP COLUMN`, `ALTER COLUMN ... TYPE` (Oracle converts
+the data; `USING` is not supported), `SET`/`DROP NOT NULL`, `SET`/`DROP
+DEFAULT` (constants), and `ADD PRIMARY KEY`/`UNIQUE`. Like `CREATE` and
+`DROP`, it runs on a session of its own and commits at once.
+
+- **Not supported:** `INSERT ... DEFAULT VALUES`, `RETURNING` on `MERGE INTO`,
+  `CREATE INDEX`, and constraints other than `NOT NULL`, `PRIMARY KEY`, and
+  `UNIQUE`. Use `orkidea_execute`.
 
 To see the SQL sent to Oracle:
 

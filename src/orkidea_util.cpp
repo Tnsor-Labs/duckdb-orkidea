@@ -3,6 +3,8 @@
 #include "orkidea_logging.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/function/table/arrow.hpp"
 
@@ -21,6 +23,62 @@ string QuoteIdentifier(const string &name) {
 
 string QuoteLiteral(const string &value) {
 	return "'" + StringUtil::Replace(value, "'", "''") + "'";
+}
+
+string NewOracleName(const string &name) {
+	bool simple = !name.empty() && name.size() <= 128 && StringUtil::CharacterIsAlpha(name[0]);
+	for (auto c : name) {
+		simple = simple && (StringUtil::CharacterIsAlphaNumeric(c) || c == '_' || c == '$' || c == '#');
+	}
+	return QuoteIdentifier(simple ? StringUtil::Upper(name) : name);
+}
+
+string OracleColumnType(const LogicalType &type, bool native_boolean) {
+	switch (type.id()) {
+	case LogicalTypeId::BOOLEAN:
+		return native_boolean ? "BOOLEAN" : "NUMBER(1)";
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::UTINYINT:
+		return "NUMBER(3)";
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::USMALLINT:
+		return "NUMBER(5)";
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::UINTEGER:
+		return "NUMBER(10)";
+	case LogicalTypeId::BIGINT:
+		return "NUMBER(19)";
+	case LogicalTypeId::UBIGINT:
+		return "NUMBER(20)";
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+		return "NUMBER(38)";
+	case LogicalTypeId::FLOAT:
+		return "BINARY_FLOAT";
+	case LogicalTypeId::DOUBLE:
+		return "BINARY_DOUBLE";
+	case LogicalTypeId::DECIMAL:
+		return StringUtil::Format("NUMBER(%d,%d)", DecimalType::GetWidth(type), DecimalType::GetScale(type));
+	case LogicalTypeId::VARCHAR:
+		return "VARCHAR2(4000)";
+	case LogicalTypeId::BLOB:
+		return "RAW(2000)";
+	case LogicalTypeId::DATE:
+		return "DATE";
+	case LogicalTypeId::TIMESTAMP_SEC:
+		return "TIMESTAMP(0)";
+	case LogicalTypeId::TIMESTAMP_MS:
+		return "TIMESTAMP(3)";
+	case LogicalTypeId::TIMESTAMP:
+		return "TIMESTAMP(6)";
+	case LogicalTypeId::TIMESTAMP_NS:
+		return "TIMESTAMP(9)";
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return "TIMESTAMP(6) WITH TIME ZONE";
+	default:
+		throw NotImplementedException("A %s column cannot be added to an Oracle table from DuckDB; use orkidea_execute",
+		                              type.ToString());
+	}
 }
 
 string MatchName(const string &name, const vector<string> &candidates) {
@@ -171,6 +229,53 @@ int64_t ExecuteStatement(ClientContext &context, shared_ptr<Connection> connecti
 	auto rows_affected = statement.ExecuteUpdate();
 	DUCKDB_LOG(context, QueryLogType, sql, ElapsedMilliseconds(start));
 	return rows_affected;
+}
+
+void ReadStream(ClientContext &context, StatementStream &stream, ColumnDataCollection &rows) {
+	ArrowSchemaWrapper schema;
+	stream.GetSchema(schema);
+	ArrowTableSchema table;
+	ArrowTableFunction::PopulateArrowTableSchema(context, table, schema.arrow_schema);
+	auto source_types = table.GetTypes();
+	auto &target_types = rows.Types();
+	if (source_types.size() != target_types.size()) {
+		throw InternalException("Oracle returned %llu columns where %llu were expected", source_types.size(),
+		                        target_types.size());
+	}
+	vector<column_t> column_ids;
+	for (idx_t i = 0; i < source_types.size(); i++) {
+		column_ids.push_back(i);
+	}
+	DataChunk source;
+	source.Initialize(Allocator::Get(context), source_types);
+	DataChunk target;
+	target.Initialize(Allocator::Get(context), target_types);
+	while (true) {
+		ArrowScanLocalState state(nullptr, context);
+		state.chunk = stream.GetNextChunk();
+		if (!state.chunk->arrow_array.release) {
+			return;
+		}
+		state.column_ids = column_ids;
+		auto length = NumericCast<idx_t>(state.chunk->arrow_array.length);
+		while (state.chunk_offset < length) {
+			auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, length - state.chunk_offset);
+			source.Reset();
+			source.SetChildCardinality(count);
+			ArrowTableFunction::ArrowToDuckDB(state, table.GetColumns(), source);
+			target.Reset();
+			for (idx_t c = 0; c < target_types.size(); c++) {
+				if (source_types[c] == target_types[c]) {
+					target.data[c].Reference(source.data[c]);
+				} else {
+					VectorOperations::Cast(context, source.data[c], target.data[c], count);
+				}
+			}
+			target.SetCardinalityUnsafe(count);
+			rows.Append(target);
+			state.chunk_offset += count;
+		}
+	}
 }
 
 vector<vector<Value>> QueryRows(ClientContext &context, shared_ptr<Connection> connection, const string &sql) {

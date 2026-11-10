@@ -27,6 +27,8 @@ struct DatabaseInfo {
 	bool unicode = true;
 	//! Whether it is AL32UTF8, whose byte order is UTF-8 code point order.
 	bool utf8_byte_order = true;
+	//! The major version (23 for 23ai); BOOLEAN columns need 23 or later.
+	idx_t major_version = 0;
 };
 
 //! Idle connections of one attached database, reused across transactions.
@@ -71,6 +73,13 @@ public:
 	                             PhysicalOperator &plan) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
+
+	//! ALTER TABLE ... ADD PRIMARY KEY / UNIQUE: Oracle builds the index, so
+	//! the statement runs as a plain ALTER (see OrkideaSchemaEntry::Alter).
+	unique_ptr<LogicalOperator> BindAlterAddIndex(Binder &binder, TableCatalogEntry &table_entry,
+	                                              unique_ptr<LogicalOperator> plan,
+	                                              unique_ptr<CreateIndexInfo> create_info,
+	                                              unique_ptr<AlterTableInfo> alter_info) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
 	bool InMemory() override {

@@ -1,0 +1,247 @@
+# name: test/sql/attach_modify.test
+# description: UPDATE, DELETE, RETURNING, ON CONFLICT, MERGE INTO, and ALTER TABLE on an attached Oracle database.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_DM\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP TABLE '' || t.table_name || '' PURGE''; END LOOP; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_dm_t (id NUMBER(10) PRIMARY KEY, name VARCHAR2(20), qty NUMBER(10) DEFAULT 0, created DATE DEFAULT DATE ''2000-01-01'', code NUMBER(10) GENERATED ALWAYS AS IDENTITY)');
+
+statement ok
+ATTACH 'ora' AS o (TYPE orkidea);
+
+# --- rowid is the Oracle ROWID ---
+
+query I
+SELECT count(*) FROM o.orkidea_dm_t;
+----
+0
+
+# --- INSERT ... RETURNING gives what Oracle stored: defaults and identity values ---
+
+query ITITI
+INSERT INTO o.orkidea_dm_t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c') RETURNING *;
+----
+1	a	0	2000-01-01 00:00:00	1
+2	b	0	2000-01-01 00:00:00	2
+3	c	0	2000-01-01 00:00:00	3
+
+query I
+SELECT count(DISTINCT rowid) = count(*) AND min(length(rowid)) = 18 FROM o.orkidea_dm_t;
+----
+true
+
+# --- UPDATE ---
+
+query I
+UPDATE o.orkidea_dm_t SET qty = qty + id * 10, name = upper(name) WHERE id >= 2;
+----
+2
+
+query ITI
+SELECT id, name, qty FROM o.orkidea_dm_t ORDER BY id;
+----
+1	a	0
+2	B	20
+3	C	30
+
+# DEFAULT is Oracle's default, and RETURNING gives the row as Oracle stored it.
+query ITI
+UPDATE o.orkidea_dm_t SET qty = DEFAULT, name = 'reset' WHERE id = 3 RETURNING id, name, qty;
+----
+3	reset	0
+
+statement ok
+CREATE TABLE changes AS SELECT * FROM (VALUES (2, 'two'), (3, 'three')) t(id, name);
+
+query I
+UPDATE o.orkidea_dm_t SET name = c.name FROM changes c WHERE o.orkidea_dm_t.id = c.id;
+----
+2
+
+query IT
+SELECT id, name FROM o.orkidea_dm_t ORDER BY id;
+----
+1	a
+2	two
+3	three
+
+statement error
+UPDATE o.orkidea_dm_t SET code = 7 WHERE id = 1;
+----
+ORA-32796
+
+# --- DELETE ---
+
+query IT
+DELETE FROM o.orkidea_dm_t WHERE id = 1 RETURNING id, name;
+----
+1	a
+
+query I
+DELETE FROM o.orkidea_dm_t WHERE name LIKE 'x%';
+----
+0
+
+query I
+SELECT count(*) FROM o.orkidea_dm_t;
+----
+2
+
+# --- ON CONFLICT, through the table's primary key ---
+
+statement ok
+INSERT INTO o.orkidea_dm_t (id, name) VALUES (2, 'duplicate'), (4, 'four') ON CONFLICT DO NOTHING;
+
+statement ok
+INSERT INTO o.orkidea_dm_t (id, name, qty) VALUES (4, 'FOUR', 40), (5, 'five', 50) ON CONFLICT (id) DO UPDATE SET name = excluded.name, qty = o.orkidea_dm_t.qty + excluded.qty;
+
+statement ok
+INSERT OR REPLACE INTO o.orkidea_dm_t (id, name, qty) VALUES (5, 'replaced', 5);
+
+query ITI
+SELECT id, name, qty FROM o.orkidea_dm_t ORDER BY id;
+----
+2	two	20
+3	three	0
+4	FOUR	40
+5	replaced	5
+
+# --- MERGE INTO ---
+
+statement ok
+MERGE INTO o.orkidea_dm_t t USING (FROM (VALUES (2, 'merged'), (9, 'new')) v(id, name)) s ON t.id = s.id
+WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name);
+
+query IT
+SELECT id, name FROM o.orkidea_dm_t ORDER BY id;
+----
+2	merged
+3	three
+4	FOUR
+5	replaced
+9	new
+
+# --- Transactions undo UPDATE and DELETE ---
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM o.orkidea_dm_t WHERE id > 2;
+
+statement ok
+UPDATE o.orkidea_dm_t SET name = 'gone';
+
+query IT
+SELECT id, name FROM o.orkidea_dm_t;
+----
+2	gone
+
+statement ok
+ROLLBACK;
+
+query I
+FROM orkidea_query('ora', 'SELECT COUNT(*) FROM orkidea_dm_t WHERE name <> ''gone''');
+----
+5
+
+# --- Views and index-organized tables have no ROWIDs ---
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE OR REPLACE VIEW orkidea_dm_v AS SELECT id, name FROM orkidea_dm_t');
+
+statement error
+DELETE FROM o.orkidea_dm_v;
+----
+has no ROWIDs
+
+statement ok
+FROM orkidea_execute('ora', 'DROP VIEW orkidea_dm_v');
+
+# --- ALTER TABLE ---
+
+statement ok
+CREATE TABLE o.orkidea_dm_alter (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO o.orkidea_dm_alter VALUES (1, 'a'), (2, 'b');
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ADD COLUMN price DECIMAL(10,2) DEFAULT 9.5;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ADD COLUMN flag BOOLEAN;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ADD COLUMN IF NOT EXISTS flag BOOLEAN;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter RENAME COLUMN name TO label;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ALTER COLUMN id TYPE BIGINT;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ALTER COLUMN label SET NOT NULL;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ALTER COLUMN price SET DEFAULT 1.25;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter ADD PRIMARY KEY (id);
+
+statement ok
+INSERT INTO o.orkidea_dm_alter (id, label) VALUES (3, 'c');
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter DROP COLUMN flag;
+
+statement ok
+ALTER TABLE o.orkidea_dm_alter RENAME TO orkidea_dm_renamed;
+
+query ITR
+FROM o.orkidea_dm_renamed ORDER BY id;
+----
+1	a	9.50
+2	b	9.50
+3	c	1.25
+
+query TTTT
+FROM orkidea_query('ora', 'SELECT column_name, data_type, nullable, TRIM(TO_CHAR(data_precision)) FROM user_tab_columns WHERE table_name = ''ORKIDEA_DM_RENAMED'' ORDER BY column_id');
+----
+ID	NUMBER	N	19
+LABEL	VARCHAR2	N	NULL
+PRICE	NUMBER	Y	10
+
+statement error
+INSERT INTO o.orkidea_dm_renamed (id, label) VALUES (4, NULL);
+----
+ORA-01400
+
+statement ok
+INSERT INTO o.orkidea_dm_renamed (id, label) VALUES (3, 'duplicate') ON CONFLICT DO NOTHING;
+
+query I
+SELECT count(*) FROM o.orkidea_dm_renamed;
+----
+3
+
+statement error
+ALTER TABLE o.orkidea_dm_renamed ALTER COLUMN price SET DEFAULT now();
+----
+Only constant defaults
+
+statement ok
+DETACH o;
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_DM\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP TABLE '' || t.table_name || '' PURGE''; END LOOP; END;');
