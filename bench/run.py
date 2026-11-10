@@ -82,7 +82,7 @@ def fingerprint(con, sql):
     return [tuple(str(v) for v in row) for row in con.sql(sql).fetchall()]
 
 
-def duckdb_engine(engine, env, runs):
+def duckdb_engine(engine, env, runs, queries, point_lookups):
     import duckdb
 
     con = duckdb.connect(config={"allow_unsigned_extensions": "true", "threads": "8"})
@@ -117,6 +117,8 @@ def duckdb_engine(engine, env, runs):
     ).fetchall()[0][0]
     results = {}
     for name, (_, sql) in DUCKDB_QUERIES.items():
+        if name not in queries:
+            continue
         try:
             times = timed(lambda sql=sql: con.execute(sql).fetchall(), runs)
         except duckdb.Error as error:
@@ -124,15 +126,17 @@ def duckdb_engine(engine, env, runs):
             results[name] = {"error": str(error).splitlines()[0]}
             continue
         results[name] = {"times": times, "result": fingerprint(con, sql)}
-    times = timed(lambda: [con.execute(POINT_SQL).fetchall() for _ in range(POINT_LOOKUPS)], runs)
+    if "point_lookup" not in queries:
+        return {"version": version, "results": results}
+    times = timed(lambda: [con.execute(POINT_SQL).fetchall() for _ in range(point_lookups)], runs)
     results["point_lookup"] = {
-        "times": [t / POINT_LOOKUPS for t in times],
+        "times": [t / point_lookups for t in times],
         "result": [tuple(str(v) for v in row) for row in con.sql(POINT_SQL).fetchall()],
     }
     return {"version": version, "results": results}
 
 
-def python_engine(engine, env, runs):
+def python_engine(engine, env, runs, queries, point_lookups):
     import pyarrow as pa
     import pyarrow.compute as pc
 
@@ -163,6 +167,8 @@ def python_engine(engine, env, runs):
 
     results = {}
     for name, (_, sql) in PYTHON_QUERIES.items():
+        if name not in queries:
+            continue
         times = timed(lambda sql=sql: fetch(sql), runs)
         table = fetch(sql)
         results[name] = {
@@ -174,6 +180,7 @@ def python_engine(engine, env, runs):
     return {"version": version, "results": results}
 
 
+ALL_QUERIES = [*DUCKDB_QUERIES, "point_lookup", *PYTHON_QUERIES]
 DUCKDB_ENGINES = ["orkidea", "orkidea-1-session", "orkidea-no-aggregates", "oracle", "oracle-tuned"]
 PYTHON_ENGINES = ["orkidea-adbc", "python-oracledb", "python-oracledb-tuned"]
 
@@ -183,13 +190,24 @@ def main():
     parser.add_argument("--engine", help=argparse.SUPPRESS)
     parser.add_argument("--runs", type=int, default=RUNS)
     parser.add_argument("--out", type=Path, default=ROOT / "bench" / "results.json")
+    parser.add_argument("--engines", default=",".join(DUCKDB_ENGINES + PYTHON_ENGINES),
+                        help="comma-separated engines to run (default: all)")
+    parser.add_argument("--queries", default=",".join(ALL_QUERIES),
+                        help="comma-separated queries to run (default: all)")
+    parser.add_argument("--point-lookups", type=int, default=POINT_LOOKUPS,
+                        help="point lookups per timed run")
     args = parser.parse_args()
+    engines = [e for e in DUCKDB_ENGINES + PYTHON_ENGINES if e in args.engines.split(",")]
+    queries = [q for q in ALL_QUERIES if q in args.queries.split(",")]
+    unknown = set(args.engines.split(",")) - set(engines) | set(args.queries.split(",")) - set(queries)
+    if unknown:
+        parser.error(f"unknown engines or queries: {', '.join(sorted(unknown))}")
 
     env = lab_env()
     if args.engine:
         os.environ.update(env)
         run = python_engine if args.engine in PYTHON_ENGINES else duckdb_engine
-        json.dump(run(args.engine, env, args.runs), sys.stdout)
+        json.dump(run(args.engine, env, args.runs, queries, args.point_lookups), sys.stdout)
         return
 
     child = dict(os.environ, **env)
@@ -201,10 +219,11 @@ def main():
         child["LD_LIBRARY_PATH"] = os.environ["ORACLE_IC"]
 
     report = {}
-    for engine in DUCKDB_ENGINES + PYTHON_ENGINES:
+    for engine in engines:
         print(f"running {engine}", file=sys.stderr, flush=True)
         out = subprocess.run(
-            [sys.executable, __file__, "--engine", engine, "--runs", str(args.runs)],
+            [sys.executable, __file__, "--engine", engine, "--runs", str(args.runs),
+             "--queries", ",".join(queries), "--point-lookups", str(args.point_lookups)],
             env=child, capture_output=True, text=True, check=False,
         )
         if out.returncode:
@@ -213,6 +232,9 @@ def main():
 
     # Every engine must return what the first of its kind returned.
     for group in (DUCKDB_ENGINES, PYTHON_ENGINES):
+        group = [e for e in group if e in report]
+        if not group:
+            continue
         base = report[group[0]]["results"]
         for engine in group[1:]:
             for name, value in report[engine]["results"].items():
@@ -228,12 +250,19 @@ def main():
 
 def print_table(report):
     def row(engines, queries):
+        engines = [e for e in engines if e in report]
+        queries = {n: q for n, q in queries.items() if any(n in report[e]["results"] for e in engines)}
+        if not engines or not queries:
+            return
         print("| Query | " + " | ".join(engines) + " |")
         print("| --- |" + " ---: |" * len(engines))
         for name, (description, _) in queries.items():
             cells = []
             for engine in engines:
-                result = report[engine]["results"][name]
+                result = report[engine]["results"].get(name)
+                if result is None:
+                    cells.append("")
+                    continue
                 if "error" in result:
                     cells.append("fails")
                     continue

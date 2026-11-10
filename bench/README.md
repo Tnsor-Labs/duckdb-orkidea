@@ -63,13 +63,60 @@ python-oracledb's 0.30 s. With python-oracledb's default `arraysize` (100),
 the Orkidea driver is faster. In DuckDB, orkidea's parallel sessions more
 than make up for the difference.
 
+## Over a network
+
+`bench/network.sh` runs part of the benchmark again with delay added to every
+round trip between the client and Oracle (with `tc netem`, from a container
+sharing the lab container's network): 1 ms is about a data center, 5 ms a
+region, 20 ms a WAN. Medians of three runs:
+
+| Query | Delay | orkidea | orkidea, 1 session | `oracle` | `oracle`, tuned |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Copy 2 of `ORDERS`' 7 columns | 0 ms | **0.52 s** | 1.37 s | 5.46 s | 4.20 s |
+| | 1 ms | **0.58 s** | 1.39 s | 6.02 s | 4.11 s |
+| | 5 ms | **0.62 s** | 1.93 s | 9.35 s | 4.49 s |
+| | 20 ms | **1.00 s** | 3.95 s | 21.59 s | 6.48 s |
+| `GROUP BY status` | 0 ms | **0.19 s** | 0.19 s | 5.21 s | 4.40 s |
+| | 20 ms | **0.27 s** | 0.24 s | 22.49 s | 6.98 s |
+| Top 10 by amount | 0 ms | **0.14 s** | 0.14 s | 5.00 s | 3.98 s |
+| | 20 ms | **0.18 s** | 0.18 s | 21.39 s | 6.54 s |
+| Orders of one customer (50 rows) | 0 ms | **39 ms** | 42 ms | 49 ms | 120 ms |
+| | 20 ms | 110 ms | **81 ms** | 170 ms | 240 ms |
+| Point lookup on `EMP`, per query | 0 ms | 2.3 ms | **1.8 ms** | 5.7 ms | 15.1 ms |
+| | 1 ms | **3.4 ms** | 3.5 ms | 11.7 ms | 19.4 ms |
+| | 5 ms | 8.8 ms | **8.2 ms** | 37.7 ms | 44.6 ms |
+| | 20 ms | 23.2 ms | **23.1 ms** | 130 ms | 140 ms |
+
+- **A point lookup** takes orkidea one round trip, and `oracle` about six.
+- **Pushdown counts for more** with distance: the `GROUP BY` and the top-N
+  send a few rows back, so they barely change, while reading the table into
+  DuckDB pays for every batch.
+- **Parallel sessions** wait for their round trips at the same time: at
+  20 ms, eight read the table in 1.0 s, against 3.95 s for one.
+- **The single-session estimate costs a round trip.** For a filter that
+  leaves few rows, orkidea first reads the columns' statistics
+  (see [Parallel scans](../README.md#parallel-scans)), so at 20 ms it takes
+  110 ms where one session alone takes 81 ms; without the estimate, the
+  parallel plan's extra round trips would cost more.
+
+From Python, through one session (2 columns, 1M rows):
+
+| Delay | Orkidea ADBC | python-oracledb, `arraysize=10000` |
+| ---: | ---: | ---: |
+| 0 ms | 1.34 s | **0.98 s** |
+| 1 ms | 1.33 s | **1.00 s** |
+| 5 ms | 1.99 s | **1.48 s** |
+| 20 ms | 3.93 s | **3.15 s** |
+
+Both fetch about as many rows per round trip (8,192 and 10,000), so the
+delay adds about the same to each; the difference is decoding, as above.
+
 ## Caveats
 
 - One laptop (Intel Core i7-1165G7, 4 cores, 8 threads) runs both Oracle
   Database Free 23.26 in a container and the client, so they compete for
-  the CPU, and there is no network between them. Over a real network,
-  fetching fewer, larger batches matters more, and Oracle has the machine
-  to itself.
+  the CPU. Apart from the [delays added](#over-a-network), there is no
+  network between them, and on a real one Oracle has the machine to itself.
 - `ORDERS` is small enough to stay in Oracle's buffer cache after the
   warm-up, so these are not disk reads.
 - The tables have no indexes, as in the lab.
@@ -90,5 +137,9 @@ It uses orkidea from this repository's release build, or
 `ORKIDEA_EXTENSION`. Each engine runs in a process of its own, and every
 query's result is checked against the first engine's, so a fast wrong answer
 fails the run. The run writes `bench/results.json` and prints the tables
-above. `--runs` sets the number of timed runs (default 5); a full run takes
+above. `--engines` and `--queries` run part of it.
+
+`bench/network.sh` needs Docker and the lab container; it runs the network
+table's queries at each delay (default 0, 1, 5, and 20 ms) into
+`bench/results-network-<delay>ms.json`, and removes the delay when it ends. `--runs` sets the number of timed runs (default 5); a full run takes
 about fifteen minutes, most of it in the `oracle` extension's scans.
