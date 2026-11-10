@@ -64,6 +64,35 @@ into Arrow arrays; the Orkidea driver does so in Rust, and decodes `NUMBER`
 into integers and decimals from its bytes. Driver 0.2.1 took 3.36 s and
 1.38 s.
 
+## Other column types
+
+`bench/mixed.sql` creates `BENCH_MIXED`: 300,000 rows with `JSON`, a
+16-dimension `FLOAT32` `VECTOR`, an interval, and an `NCLOB` beside numbers,
+text, and a timestamp. Driver 0.3.0 read a query with any of those four types
+row by row; the driver's `main` (3f80fcb) decodes every type into Arrow
+columns. `bench/mixed.py` reads it through one session; medians of five runs:
+
+| Query (300k rows) | Orkidea 0.3.0 | Orkidea `main` | python-oracledb, `arraysize=10000` |
+| --- | ---: | ---: | ---: |
+| All columns and the `ROWID` | 5.54 s | 5.61 s | fails |
+| `id`, `JSON` | 2.70 s | **2.19 s** | fails |
+| `id`, `VECTOR` | 1.12 s | **1.01 s** | 1.41 s |
+| `id`, interval | 0.40 s | **0.19 s** | 0.27 s |
+| `id`, `NCLOB` | 1.20 s | **1.19 s** | 1.53 s |
+| Numbers, text, and a timestamp | **0.27 s** | **0.27 s** | 0.52 s |
+
+python-oracledb's `fetch_df_all` refuses `JSON` ("NotSupportedError").
+
+Decoding them column by column helps intervals, but little else: for these
+types, the time goes elsewhere.
+
+- **`JSON`** takes 1.34 s of the client's CPU, for decoding Oracle's binary
+  JSON (OSON) into values and writing them as text. Selected as text with
+  `JSON_SERIALIZE(doc)`, the same rows take 1.15 s, and 0.12 s of CPU.
+- **`VECTOR` and `NCLOB`** values arrive as LOBs and take 0.3 s of the
+  client's CPU; the rest is the database's. Cast to `NVARCHAR2`, the `NCLOB`
+  column takes 0.55 s.
+
 ## Over a network
 
 `bench/network.sh` runs part of the benchmark again with delay added to every
