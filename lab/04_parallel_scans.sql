@@ -16,7 +16,10 @@ CREATE OR REPLACE TABLE orders_local AS FROM oracle.orders;
 
 .timer off
 
--- The same rows, in the same (ROWID) order a single session gives.
+-- The same rows, and here in the same order: several sessions give ROWID
+-- order, and one session the order of the table's extents, which is the same
+-- when the extents lie in block order, as they usually do. Without ORDER BY,
+-- Oracle promises neither.
 SELECT (SELECT count(*) FROM orders_one) AS one, (SELECT count(*) FROM orders_four) AS four,
        (SELECT count(*) FROM orders_local) AS default_sessions,
        (SELECT bool_and(a.order_id = b.order_id)

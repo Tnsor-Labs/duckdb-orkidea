@@ -71,9 +71,14 @@ SELECT count(*) FROM parallel;
 ----
 300000
 
-# Insertion order is kept: rows come in ROWID order, which here is id order.
+# Insertion order is kept: the ranges come back in ROWID order. (One
+# session's full scan follows the order of the extents, which a fresh
+# database need not lay out in block order, so it is not compared.)
 query I
-SELECT count(*) FROM (SELECT id - lag(id) OVER () AS step FROM parallel) WHERE step < 0;
+SELECT count(*) FROM (SELECT id, row_number() OVER () AS n FROM parallel) p
+JOIN (SELECT "ID" AS id, row_number() OVER () AS n
+      FROM orkidea_query('ora', 'SELECT id FROM ORKIDEA_DUCK_PARALLEL ORDER BY ROWID')) o USING (n)
+WHERE p.id <> o.id;
 ----
 0
 

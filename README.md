@@ -109,9 +109,11 @@ through several sessions at once: as many as DuckDB has threads, up to 8.
 Each session reads ranges of the table's ROWIDs, so together they read the
 table once. All of them read `AS OF SCN` one change number taken first, so
 the result is one consistent snapshot. Batches keep ROWID order, so
-`CREATE TABLE ... AS` and `INSERT ... SELECT` keep the order a single
-session would give. On a 2,000,000-row table, copying it into DuckDB took
-2.5 s through four sessions instead of 5.9 s through one.
+`CREATE TABLE ... AS` and `INSERT ... SELECT` get the rows in ROWID order.
+One session reads a table in the order of its extents, which is ROWID order
+when the extents lie in block order, as they usually do; without `ORDER BY`,
+Oracle promises neither. On a 2,000,000-row table, copying it into DuckDB
+took 2.5 s through four sessions instead of 5.9 s through one.
 
 ```sql
 SET orkidea_parallel_scan = 4;               -- sessions per scan; 0 or 1 for one, -1 (default) to choose
