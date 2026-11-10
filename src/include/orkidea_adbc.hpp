@@ -67,6 +67,9 @@ public:
 	void SetOption(const string &key, const string &value);
 	//! Binds rows to insert, for bulk ingest. The statement takes the stream.
 	void BindStream(ArrowArrayStream &stream);
+	//! Binds a batch of parameters, one execution per row. The statement takes
+	//! the values; the caller keeps the schema.
+	void Bind(ArrowArray &values, ArrowSchema &schema);
 	//! Describes the result set of the query without running it.
 	void ExecuteSchema(ArrowSchema &schema);
 	//! Runs the query. The stream must be released before the statement.

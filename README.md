@@ -257,6 +257,35 @@ Quote Oracle SQL that contains quotes with `$$`:
 FROM orkidea_query('ora', $$SELECT ename FROM emp WHERE job = 'CLERK'$$);
 ```
 
+Bind values to the query's placeholders with `params`. Values travel to Oracle
+as binds, never as SQL text, so they need no quoting or escaping, and Oracle
+reuses one cursor for every value. A STRUCT binds by name and a `row(...)` by
+position (`:1`, `:2`, ... in order of first appearance):
+
+```sql
+FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = :dept AND hiredate >= :since',
+                   params := {'dept': 10, 'since': DATE '1981-06-01'});
+
+FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = :1', params := row(10));
+
+-- prepared statements bind new values on each execution
+PREPARE emp_of AS FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = :d', params := {'d': $1});
+EXECUTE emp_of(20);
+```
+
+Things to know:
+
+- Oracle describes a query without its parameter values. CAST a placeholder
+  that appears in the select list, as in `SELECT CAST(:d AS DATE) ...`;
+  otherwise it is described as `VARCHAR2`, and a value of any other type fails
+  with an error naming the column.
+- A TIMESTAMP WITH TIME ZONE parameter is rejected, because the driver would
+  bind it without its time zone. Bind its UTC time instead,
+  `params := {'t': ts AT TIME ZONE 'UTC'}`, and convert it with
+  `FROM_TZ(CAST(:t AS TIMESTAMP), 'UTC')`.
+- To bind by name, give each placeholder its own name: a name used twice in
+  one query fails. By position, pass one value per use.
+
 Run DDL, DML, or PL/SQL. The result is the number of rows affected:
 
 ```sql

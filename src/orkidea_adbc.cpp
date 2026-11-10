@@ -159,6 +159,11 @@ void Statement::BindStream(ArrowArrayStream &stream) {
 	Check(Driver().StatementBindStream(&handle, &stream, error.Get()), error, "binding rows");
 }
 
+void Statement::Bind(ArrowArray &values, ArrowSchema &schema) {
+	ErrorScope error;
+	Check(Driver().StatementBind(&handle, &values, &schema, error.Get()), error, "binding parameters");
+}
+
 void Statement::ExecuteSchema(ArrowSchema &schema) {
 	ErrorScope error;
 	Check(Driver().StatementExecuteSchema(&handle, &schema, error.Get()), error, "describing the query");

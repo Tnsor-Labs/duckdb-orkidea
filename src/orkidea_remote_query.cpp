@@ -13,8 +13,10 @@ namespace {
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<RemoteQueryBindData>();
 	auto result = make_uniq<ArrowScanGlobalState>();
-	result->stream =
+	auto stream =
 	    OpenQuery(context, OrkideaTransaction::Get(context, bind_data.catalog).GetConnection(), bind_data.sql);
+	CheckResultTypes(context, *stream, bind_data.all_types);
+	result->stream = std::move(stream);
 	result->max_threads = context.db->NumberOfThreads();
 	return std::move(result);
 }
@@ -34,8 +36,8 @@ RemoteQueryBindData::RemoteQueryBindData(OrkideaCatalog &catalog_p, shared_ptr<A
 TableFunction RemoteQuery::Function(ClientContext &context, OrkideaCatalog &catalog, string sql,
                                     unique_ptr<FunctionData> &bind_data, vector<LogicalType> &types) {
 	auto connection = OrkideaTransaction::Get(context, catalog).GetConnection();
-	auto result =
-	    make_uniq<RemoteQueryBindData>(catalog, make_shared_ptr<QueryScanFactory>(std::move(connection), sql), sql);
+	auto result = make_uniq<RemoteQueryBindData>(
+	    catalog, make_shared_ptr<QueryScanFactory>(context, std::move(connection), sql), sql);
 	result->factory->GetSchema(result->schema_root.arrow_schema);
 	ArrowTableFunction::PopulateArrowTableSchema(context, result->arrow_table, result->schema_root.arrow_schema);
 	types = result->arrow_table.GetTypes();

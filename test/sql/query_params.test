@@ -1,0 +1,186 @@
+# name: test/sql/query_params.test
+# description: orkidea_query binds its params to the query's placeholders, by name or by position.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE orkidea_qp_t PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_qp_t (id NUMBER(9), name VARCHAR2(20), born DATE, at TIMESTAMP(6), amount NUMBER(10,2), data RAW(4))');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_qp_t SELECT LEVEL, ''n'' || LEVEL, DATE ''2026-01-01'' + LEVEL, TIMESTAMP ''2026-01-01 00:00:00'' + NUMTODSINTERVAL(LEVEL, ''MINUTE''), LEVEL / 4, HEXTORAW(''AB0'' || MOD(LEVEL, 10)) FROM dual CONNECT BY LEVEL <= 100');
+
+# --- By name: a STRUCT's fields bind the placeholders of their names, in any order ---
+
+query II
+SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHERE id BETWEEN :lo AND :hi ORDER BY id', params := {'hi': 3, 'lo': 2});
+----
+2	n2
+3	n3
+
+# Unquoted placeholder names match case-insensitively.
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE name = :NAME', params := {'name': 'n7'});
+----
+1
+
+# --- By position: row(...) binds :1, :2, ... in order of first appearance ---
+
+query II
+SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHERE id > :a AND name LIKE :b ORDER BY id', params := row(97, 'n%'));
+----
+98	n98
+99	n99
+100	n100
+
+# --- Each DuckDB type binds as the matching Oracle type ---
+
+query I
+SELECT id FROM orkidea_query('ora', 'SELECT id FROM orkidea_qp_t WHERE born = :d', params := {'d': DATE '2026-01-06'});
+----
+5
+
+query I
+SELECT id FROM orkidea_query('ora', 'SELECT id FROM orkidea_qp_t WHERE at = :t', params := {'t': TIMESTAMP '2026-01-01 00:42:00'});
+----
+42
+
+query I
+SELECT id FROM orkidea_query('ora', 'SELECT id FROM orkidea_qp_t WHERE amount = :a', params := {'a': 2.75::DECIMAL(10,2)});
+----
+11
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE amount < :a', params := {'a': 1.0::DOUBLE});
+----
+3
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE data = :r', params := {'r': from_hex('AB03')});
+----
+10
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE :b = TRUE AND id <= 4', params := {'b': true});
+----
+4
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE id = :big', params := {'big': 50::HUGEINT});
+----
+1
+
+# A NULL value binds as NULL.
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE :n IS NULL', params := {'n': NULL});
+----
+100
+
+# A value is data, never SQL.
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE name = :name', params := {'name': 'x'' OR ''1''=''1'});
+----
+0
+
+# A placeholder in the select list returns its value, once CAST to a type.
+query TTI
+SELECT * FROM orkidea_query('ora', 'SELECT CAST(:d AS DATE) AS d, :s AS s, CAST(:n AS NUMBER(9)) AS n FROM dual', params := {'d': DATE '2026-03-04', 's': 'hi', 'n': 7});
+----
+2026-03-04 00:00:00	hi	7
+
+# A TIMESTAMP WITH TIME ZONE binds as its UTC time, converted in Oracle.
+query T
+SELECT * FROM orkidea_query('ora', 'SELECT TO_CHAR(FROM_TZ(CAST(:t AS TIMESTAMP), ''UTC''), ''YYYY-MM-DD HH24:MI:SS TZR'') FROM dual', params := {'t': TIMESTAMPTZ '2026-01-02 05:04:05+02' AT TIME ZONE 'UTC'});
+----
+2026-01-02 03:04:05 UTC
+
+# params := NULL, as when it is left out, binds nothing.
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t', params := NULL);
+----
+100
+
+# --- Prepared statements bind new values on each execution ---
+
+statement ok
+PREPARE by_id AS SELECT name FROM orkidea_query('ora', 'SELECT name FROM orkidea_qp_t WHERE id = :id', params := {'id': $1});
+
+query T
+EXECUTE by_id(12);
+----
+n12
+
+query T
+EXECUTE by_id(34);
+----
+n34
+
+# --- Errors ---
+
+statement error
+FROM orkidea_query('ora', 'SELECT 1 FROM dual WHERE 1 = :a', params := {'b': 1});
+----
+no bound parameter is named "A"
+
+statement error
+FROM orkidea_query('ora', 'SELECT 1 FROM dual WHERE :a = :b', params := row(1));
+----
+2 positional bind values are required but 1 were provided
+
+statement error
+FROM orkidea_query('ora', 'SELECT 1 FROM dual WHERE 1 = :a', params := 1);
+----
+params must be a STRUCT
+
+statement error
+FROM orkidea_query('ora', 'SELECT 1 FROM dual WHERE :t IS NULL', params := {'t': TIMESTAMPTZ '2026-01-02 03:04:05+00'});
+----
+parameter t is a TIMESTAMP WITH TIME ZONE
+
+# Arrow carries a HUGEINT as a DECIMAL(38,0), which this one does not fit.
+statement error
+FROM orkidea_query('ora', 'SELECT 1 FROM dual WHERE 1 = :h', params := {'h': 170141183460469231731687303715884105727::HUGEINT});
+----
+parameter h: Could not cast value
+
+# Oracle describes an uncast placeholder in the select list as VARCHAR2.
+statement error
+FROM orkidea_query('ora', 'SELECT :d AS d FROM dual', params := {'d': DATE '2026-03-04'});
+----
+column D of the query is TIMESTAMP_NS when it runs, but was VARCHAR when it was planned
+
+# --- A table that changes between planning and running fails cleanly ---
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE orkidea_qp_c PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_qp_c (v NUMBER(9))');
+
+statement ok
+PREPARE changed AS SELECT * FROM orkidea_query('ora', 'SELECT * FROM orkidea_qp_c');
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_qp_c PURGE');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_qp_c (v VARCHAR2(10))');
+
+statement error
+EXECUTE changed;
+----
+column V of the query is VARCHAR when it runs, but was INTEGER when it was planned
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_qp_c PURGE');
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_qp_t PURGE');
