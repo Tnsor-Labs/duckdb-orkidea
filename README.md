@@ -14,6 +14,10 @@ LOAD orkidea;
 
 Until then, build it from source (see [Building](#building)).
 
+**Try it:** the [lab](lab/README.md) starts an Oracle database in a container
+and walks through every feature below, from a first query to writes, bind
+parameters, parallel scans, and Python, in short modules with expected results.
+
 - No Oracle Instant Client, OCI, or ODBC: the driver speaks Oracle's network
   protocol itself and is linked into the extension.
 - Results stream into DuckDB as Arrow record batches, with exact types:

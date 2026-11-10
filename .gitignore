@@ -8,3 +8,8 @@ test/python/__pycache__/
 .Rhistory
 rust/target/
 .cache/
+
+# Lab: connection details and files the lab writes
+lab/.lab.env
+lab/tns/
+lab/out/
