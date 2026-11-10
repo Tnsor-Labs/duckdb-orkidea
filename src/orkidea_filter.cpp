@@ -313,6 +313,19 @@ bool IsInternal(const Expression &expr) {
 	       TableFilterFunctions::IsTableFilterFunction(expr.Cast<BoundFunctionExpression>().Function());
 }
 
+//! The filter inside an optional filter, which DuckDB may apply or not
+//! (as for an IN list); null for other internal filters (dynamic, Bloom).
+optional_ptr<const Expression> OptionalFilterChild(const BoundFunctionExpression &func) {
+	auto &name = func.Function().GetName();
+	if (name == OptionalFilterScalarFun::NAME && func.BindInfo()) {
+		return func.BindInfo()->Cast<OptionalFilterFunctionData>().child_filter_expr.get();
+	}
+	if (name == SelectivityOptionalFilterScalarFun::NAME && func.BindInfo()) {
+		return func.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>().child_filter_expr.get();
+	}
+	return nullptr;
+}
+
 //! A filter Oracle applies exactly.
 TranslatedFilter Exact(string sql) {
 	return TranslatedFilter {std::move(sql), false};
@@ -355,13 +368,7 @@ private:
 	//! Optional filters may be applied or not, so they never need local
 	//! evaluation. Other internal filters (dynamic, Bloom) are not pushed.
 	TranslatedFilter TranslateInternal(const BoundFunctionExpression &func) const {
-		auto &name = func.Function().GetName();
-		optional_ptr<const Expression> child;
-		if (name == OptionalFilterScalarFun::NAME && func.BindInfo()) {
-			child = func.BindInfo()->Cast<OptionalFilterFunctionData>().child_filter_expr.get();
-		} else if (name == SelectivityOptionalFilterScalarFun::NAME && func.BindInfo()) {
-			child = func.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>().child_filter_expr.get();
-		}
+		auto child = OptionalFilterChild(func);
 		if (!child) {
 			return TranslatedFilter {string(), false};
 		}
@@ -529,6 +536,58 @@ bool IsNumericColumn(const string &oracle_type) {
 
 TranslatedFilter TranslateFilter(const FilterColumn &column, const Expression &expr) {
 	return Translator(column).Translate(expr);
+}
+
+idx_t MatchedValues(const Expression &expr) {
+	if (IsInternal(expr)) {
+		auto child = OptionalFilterChild(expr.Cast<BoundFunctionExpression>());
+		return child ? MatchedValues(*child) : 0;
+	}
+	if (BoundComparisonExpression::IsComparison(expr)) {
+		auto type = expr.GetExpressionType();
+		if (type != ExpressionType::COMPARE_EQUAL && type != ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			return 0;
+		}
+		auto &comparison = expr.Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::Left(comparison);
+		auto &right = BoundComparisonExpression::Right(comparison);
+		bool constant = (IsColumnOrWidened(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) ||
+		                (IsColumnOrWidened(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT);
+		return constant ? 1 : 0;
+	}
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_OPERATOR: {
+		auto &op = expr.Cast<BoundOperatorExpression>();
+		auto &children = op.GetChildren();
+		if (op.GetExpressionType() != ExpressionType::COMPARE_IN || children.size() < 2 ||
+		    !IsColumnOrWidened(*children[0])) {
+			return 0;
+		}
+		for (idx_t i = 1; i < children.size(); i++) {
+			if (children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+				return 0;
+			}
+		}
+		return children.size() - 1;
+	}
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		if (conjunction.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
+			return 0;
+		}
+		// Every term holds, so the fewest values any term allows.
+		idx_t fewest = 0;
+		for (auto &child : conjunction.GetChildren()) {
+			auto values = MatchedValues(*child);
+			if (values > 0 && (fewest == 0 || values < fewest)) {
+				fewest = values;
+			}
+		}
+		return fewest;
+	}
+	default:
+		return 0;
+	}
 }
 
 } // namespace orkidea

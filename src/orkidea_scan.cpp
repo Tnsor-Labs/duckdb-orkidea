@@ -182,8 +182,56 @@ struct TableScanLocalState : public LocalTableFunctionState {
 	vector<pair<idx_t, unique_ptr<ExpressionExecutor>>> filters;
 };
 
+//! The rows a scan returns, as Oracle's statistics estimate them: the
+//! table's rows, times, for each equality or IN filter Oracle applies, its
+//! values over the column's distinct values (ALL_TAB_COLUMNS.NUM_DISTINCT).
+//! Other filters are not counted, so this can only overestimate.
+double EstimatedScanRows(ClientContext &context, const TableScanBindData &bind_data,
+                         const TableFunctionInitInput &input) {
+	auto &table = *bind_data.table;
+	double rows = static_cast<double>(table.estimated_rows);
+	if (!input.filters) {
+		return rows;
+	}
+	unordered_map<string, idx_t> matched;
+	for (auto &entry : *input.filters) {
+		auto column = input.column_ids[entry.GetIndex().GetIndex()];
+		if (IsVirtualColumn(column)) {
+			continue;
+		}
+		auto &expr = *ExpressionFilter::GetExpressionFilter(entry.Filter(), "orkidea scan").expr;
+		auto translated =
+		    TranslateFilter(MakeFilterColumn(table, column, bind_data.catalog.GetDatabaseInfo().unicode), expr);
+		auto values = MatchedValues(expr);
+		if (values > 0 && !translated.sql.empty() && !translated.evaluate_locally) {
+			matched[table.column_names[column]] = values;
+		}
+	}
+	if (matched.empty()) {
+		return rows;
+	}
+	vector<string> names;
+	for (auto &entry : matched) {
+		names.push_back(QuoteLiteral(entry.first));
+	}
+	auto sql = "SELECT column_name, num_distinct FROM all_tab_columns WHERE owner = " + QuoteLiteral(table.schema) +
+	           " AND table_name = " + QuoteLiteral(table.name) + " AND column_name IN (" +
+	           StringUtil::Join(names, ", ") + ")";
+	auto connection = OrkideaTransaction::Get(context, bind_data.catalog).GetConnection();
+	for (auto &row : QueryRows(context, connection, sql)) {
+		if (row[1].IsNull()) {
+			continue;
+		}
+		auto distinct = row[1].GetValue<double>();
+		if (distinct > 0) {
+			rows *= MinValue<double>(1.0, static_cast<double>(matched[row[0].ToString()]) / distinct);
+		}
+	}
+	return rows;
+}
+
 //! How many sessions a scan of the table should use: 1 for a single stream.
-idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data) {
+idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data, const TableFunctionInitInput &input) {
 	// A pushed LIMIT or order needs one ordered stream; rows a transaction
 	// wrote, and rows it locks, belong to its own session.
 	if (!bind_data.table->splittable || bind_data.row_limit.IsValid() || !bind_data.order_by.empty() ||
@@ -201,6 +249,12 @@ idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data) {
 	}
 	if (sessions == 0 || sessions == 1 || bind_data.table->estimated_rows < 0 ||
 	    NumericCast<idx_t>(bind_data.table->estimated_rows) < min_rows) {
+		return 1;
+	}
+	// A filter that leaves few rows is read faster by one query than by the
+	// change number, ROWID planning, and range queries of a parallel scan.
+	// A number of sessions the user set is used as set.
+	if (sessions < 0 && EstimatedScanRows(context, bind_data, input) < static_cast<double>(min_rows)) {
 		return 1;
 	}
 	auto threads = NumericCast<idx_t>(context.db->NumberOfThreads());
@@ -289,7 +343,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 
 	auto result = make_uniq<TableScanGlobalState>();
 	result->local_filters = std::move(plan.local_filters);
-	auto sessions = ScanSessions(context, bind_data);
+	auto sessions = ScanSessions(context, bind_data, input);
 	if (sessions < 2 || !PlanRanges(context, bind_data, input, sessions, *result)) {
 		// One stream feeds every thread; threads convert its batches in parallel.
 		auto &transaction = OrkideaTransaction::Get(context, bind_data.catalog);

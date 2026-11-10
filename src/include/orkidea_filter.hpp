@@ -57,5 +57,11 @@ bool IsNumericColumn(const string &oracle_type);
 //! dropped when they cannot be translated, and never need local evaluation.
 TranslatedFilter TranslateFilter(const FilterColumn &column, const Expression &expr);
 
+//! How many values of the column a filter lets through, when it is an
+//! equality (`= constant`) or an `IN` list, or an AND with one, optional or
+//! not: 1 for an equality, the list's length for `IN`. 0 when the filter is
+//! anything else.
+idx_t MatchedValues(const Expression &expr);
+
 } // namespace orkidea
 } // namespace duckdb

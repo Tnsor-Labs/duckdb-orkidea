@@ -98,6 +98,63 @@ SELECT count(*) FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%
 ----
 0
 
+# When the scan chooses its sessions, a filter Oracle's statistics say
+# leaves few rows is read through one: equality and IN on a column with many
+# distinct values (id has 300000). DuckDB turns an IN list of consecutive
+# integers into a range, which is not estimated.
+statement ok
+RESET orkidea_parallel_scan;
+
+statement ok
+SET orkidea_parallel_scan_min_rows = 100000;
+
+# Aggregates would run in Oracle, without a scan.
+statement ok
+SET orkidea_aggregate_pushdown = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, label FROM o.ORKIDEA_DUCK_PARALLEL WHERE id = 42;
+----
+42	label 42
+
+query I
+SELECT count(*) FROM o.ORKIDEA_DUCK_PARALLEL WHERE id IN (5, 500, 50000) AND amount >= 0;
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%';
+----
+0
+
+# An equality on a column with two values leaves half the table, and a range
+# is not estimated, so both are still read in ranges.
+query I
+SELECT (SELECT count(*) FROM o.ORKIDEA_DUCK_PARALLEL WHERE flag = true) = (SELECT count(*) FROM serial WHERE flag);
+----
+true
+
+query I
+SELECT count(*) >= 2 FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%ROWID%';
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT (SELECT count(*) FROM o.ORKIDEA_DUCK_PARALLEL WHERE id > 1000) = (SELECT count(*) FROM serial WHERE id > 1000);
+----
+true
+
+query I
+SELECT count(*) >= 2 FROM duckdb_logs WHERE type = 'OrkideaQuery' AND message LIKE '%AS OF SCN%ROWID%';
+----
+true
+
 statement ok
 DETACH o;
 
