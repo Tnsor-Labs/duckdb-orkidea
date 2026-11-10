@@ -74,6 +74,26 @@ Oracle gives exactly the result DuckDB would:
   only when every filter on the scan runs in Oracle, and an order only on
   types Oracle sorts as DuckDB does. Strings sort the same only in an
   AL32UTF8 database.
+- **Aggregates**: `GROUP BY`, `SELECT DISTINCT`, and `count(*)`,
+  `count`, `count(DISTINCT ...)`, `sum`, `avg`, `min`, and `max` directly
+  over a table become one Oracle query, so only the groups come back.
+  `HAVING`, `ORDER BY`, and joins above it stay in DuckDB. Every group key
+  and argument must be a column, and every filter on the table must run in
+  Oracle. Results have DuckDB's types: Oracle's sums are cast to
+  `NUMBER(38,s)`, so they are exact. An `avg`, or a `sum` of `DOUBLE`
+  values, can differ from DuckDB's in the last digits: Oracle computes it
+  exactly and rounds once. The aggregate stays in DuckDB for:
+  - expressions (`sum(a * b)`), `FILTER (WHERE ...)`, ordered aggregates,
+    and functions Oracle lacks (`median`, `list`, ...);
+  - `min` and `max` of strings that sort differently (as for `ORDER BY`),
+    and LOBs;
+  - group keys that are unconstrained `NUMBER` columns read as `DOUBLE`,
+    where distinct numbers can round to one double.
+
+  `EXPLAIN` shows the Oracle SQL. `SET orkidea_aggregate_pushdown = false`
+  turns this off. On a 10,000,000-row table, a `GROUP BY` with 50 groups
+  took 1.5 s in Oracle instead of 3.2 s reading every row into DuckDB, over
+  a local connection; over a network, the rows not sent count for more.
 
 ### Parallel scans
 

@@ -521,6 +521,28 @@ bool TableScan::HasLocalFilters(const LogicalGet &get) {
 	return false;
 }
 
+vector<string> TableScan::Conditions(const LogicalGet &get) {
+	auto &bind_data = get.bind_data->Cast<TableScanBindData>();
+	auto unicode_database = bind_data.catalog.GetDatabaseInfo().unicode;
+	vector<string> result;
+	for (auto &entry : get.table_filters) {
+		auto &column = get.GetColumnIds()[entry.GetIndex().GetIndex()];
+		auto &expr = *ExpressionFilter::GetExpressionFilter(entry.Filter(), "orkidea scan").expr;
+		if (column.IsVirtualColumn()) {
+			throw InternalException("orkidea_scan: a filter on a virtual column has no Oracle condition");
+		}
+		auto translated =
+		    TranslateFilter(MakeFilterColumn(*bind_data.table, column.GetPrimaryIndex(), unicode_database), expr);
+		if (translated.evaluate_locally) {
+			throw InternalException("orkidea_scan: a filter Oracle cannot evaluate has no Oracle condition");
+		}
+		if (!translated.sql.empty()) {
+			result.push_back(std::move(translated.sql));
+		}
+	}
+	return result;
+}
+
 TableFunction TableScan::Function(ClientContext &context, OrkideaCatalog &catalog, OrkideaTableEntry &entry,
                                   shared_ptr<const OracleTable> table, unique_ptr<FunctionData> &bind_data) {
 	auto result = make_uniq<TableScanBindData>(catalog, entry, std::move(table));

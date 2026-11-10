@@ -512,6 +512,21 @@ bool CanOrderColumn(const string &oracle_type, bool utf8_byte_order) {
 	}
 }
 
+bool CanGroupColumn(const string &oracle_type) {
+	return Classify(oracle_type) != ColumnKind::NONE;
+}
+
+bool IsNumericColumn(const string &oracle_type) {
+	switch (Classify(oracle_type)) {
+	case ColumnKind::NUMBER:
+	case ColumnKind::BINARY_FLOAT:
+	case ColumnKind::BINARY_DOUBLE:
+		return true;
+	default:
+		return false;
+	}
+}
+
 TranslatedFilter TranslateFilter(const FilterColumn &column, const Expression &expr) {
 	return Translator(column).Translate(expr);
 }

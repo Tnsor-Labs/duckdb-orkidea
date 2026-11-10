@@ -60,6 +60,9 @@ struct TableScan {
 	//! Whether DuckDB must evaluate any of the scan's filters itself, which
 	//! rules out fetching only the first rows.
 	static bool HasLocalFilters(const LogicalGet &get);
+	//! The scan's filters as Oracle conditions, for a scan without local
+	//! filters: the WHERE clause of a query that replaces it.
+	static vector<string> Conditions(const LogicalGet &get);
 };
 
 } // namespace orkidea

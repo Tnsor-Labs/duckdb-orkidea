@@ -43,6 +43,15 @@ bool CanCompareColumn(const string &oracle_type);
 //! sorts as DuckDB does. `utf8_byte_order`: the database character set is AL32UTF8.
 bool CanOrderColumn(const string &oracle_type, bool utf8_byte_order);
 
+//! Whether Oracle's GROUP BY and DISTINCT tell the column's values apart as
+//! DuckDB does. CHAR and NCHAR values, all padded to the column's length,
+//! are equal exactly when DuckDB finds them equal.
+bool CanGroupColumn(const string &oracle_type);
+
+//! Whether the column is a NUMBER, BINARY_FLOAT, or BINARY_DOUBLE, which
+//! Oracle's SUM and AVG take.
+bool IsNumericColumn(const string &oracle_type);
+
 //! Translates a filter expression whose column references all refer to the
 //! column. Filters that only prune rows (optional and dynamic filters) are
 //! dropped when they cannot be translated, and never need local evaluation.

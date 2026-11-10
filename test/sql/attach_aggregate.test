@@ -1,0 +1,170 @@
+# name: test/sql/attach_aggregate.test
+# description: GROUP BY, aggregates, and DISTINCT over an attached Oracle table run in Oracle when it computes them as DuckDB does.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE orkidea_ag_t PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_ag_t (k NUMBER(5), s VARCHAR2(10), n NUMBER(12,2), i NUMBER(9), c CHAR(3), cl CLOB)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_ag_t SELECT MOD(LEVEL, 3), CASE WHEN MOD(LEVEL, 4) = 0 THEN NULL ELSE ''s'' || MOD(LEVEL, 5) END, LEVEL / 4, LEVEL, ''c'' || MOD(LEVEL, 2), TO_CLOB(''x'') FROM dual CONNECT BY LEVEL <= 1000');
+
+statement ok
+ATTACH 'ora' AS o (TYPE orkidea);
+
+# --- Pushed: one Oracle query, with exact result types ---
+
+query II
+EXPLAIN SELECT k, count(*), sum(n), min(s), max(i) FROM o.orkidea_ag_t WHERE i > 10 GROUP BY k;
+----
+physical_plan	<REGEX>:.*SELECT "K", CAST\(COUNT\(\*\) AS NUMBER\(18\)\), CAST\(SUM\("N"\) AS NUMBER\(38,2\)\), MIN\("S"\), CAST\(MAX\("I"\) AS NUMBER\(18\)\).*WHERE "I" > 10 GROUP BY "K".*
+
+query IIIII
+SELECT k, count(*), sum(n), min(s), max(i) FROM o.orkidea_ag_t WHERE i > 10 GROUP BY k ORDER BY k;
+----
+0	330	41703.75	s0	999
+1	330	41786.25	s0	1000
+2	330	41621.25	s0	998
+
+query TTT
+SELECT typeof(count(*)), typeof(sum(n)), typeof(sum(i)) FROM o.orkidea_ag_t;
+----
+BIGINT	DECIMAL(38,2)	HUGEINT
+
+# No rows: one row of a count and NULLs, as in DuckDB.
+query II
+SELECT count(*), sum(n) FROM o.orkidea_ag_t WHERE i < 0;
+----
+0	NULL
+
+query II
+EXPLAIN SELECT DISTINCT c FROM o.orkidea_ag_t;
+----
+physical_plan	<REGEX>:.*SELECT "C" FROM "[A-Z_]+"."ORKIDEA_AG_T" GROUP BY "C".*
+
+# CHAR values keep their padding.
+query I
+SELECT list(c ORDER BY c) = ['c0 ', 'c1 '] FROM (SELECT DISTINCT c FROM o.orkidea_ag_t);
+----
+true
+
+query II
+SELECT s, count(*) FROM o.orkidea_ag_t GROUP BY s ORDER BY s NULLS FIRST;
+----
+NULL	250
+s0	150
+s1	150
+s2	150
+s3	150
+s4	150
+
+# HAVING, ORDER BY, and joins above the aggregate stay in DuckDB.
+query II
+SELECT k, sum(i) FROM o.orkidea_ag_t GROUP BY k HAVING sum(i) > 166600 ORDER BY k;
+----
+0	166833
+1	167167
+
+query II
+SELECT a.k, a.total = b.total FROM (SELECT k, count(*) AS total FROM o.orkidea_ag_t GROUP BY k) a
+JOIN (SELECT k, count(i) AS total FROM o.orkidea_ag_t GROUP BY k) b USING (k) ORDER BY a.k;
+----
+0	true
+1	true
+2	true
+
+# --- Not pushed: DuckDB aggregates the rows it reads ---
+
+# An expression over a column.
+query II
+EXPLAIN SELECT sum(i * 2) FROM o.orkidea_ag_t;
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+# A filter Oracle cannot evaluate as DuckDB does.
+query II
+EXPLAIN SELECT count(*) FROM o.orkidea_ag_t WHERE s ILIKE 'S1%';
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+query I
+SELECT count(*) FROM o.orkidea_ag_t WHERE s ILIKE 'S1%';
+----
+150
+
+# An aggregate Oracle does not have, a FILTER clause, and a LOB.
+query II
+EXPLAIN SELECT median(i) FROM o.orkidea_ag_t;
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+query II
+EXPLAIN SELECT count(*) FILTER (WHERE k = 1) FROM o.orkidea_ag_t;
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+query II
+EXPLAIN SELECT min(cl) FROM o.orkidea_ag_t;
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+query I
+SELECT count(*) FILTER (WHERE k = 1) FROM o.orkidea_ag_t;
+----
+334
+
+# --- Transactions: the aggregate sees the transaction's own writes ---
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO o.orkidea_ag_t (k, i) VALUES (7, 1), (7, 2);
+
+query III
+SELECT k, count(*), sum(i) FROM o.orkidea_ag_t WHERE k = 7 GROUP BY k;
+----
+7	2	3
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM o.orkidea_ag_t WHERE k = 7;
+----
+0
+
+# --- The setting turns pushdown off ---
+
+statement ok
+SET orkidea_aggregate_pushdown = false;
+
+query II
+EXPLAIN SELECT k, count(*) FROM o.orkidea_ag_t GROUP BY k;
+----
+physical_plan	<!REGEX>:.*Oracle SQL.*
+
+query II
+SELECT k, count(*) FROM o.orkidea_ag_t GROUP BY k ORDER BY k;
+----
+0	333
+1	334
+2	333
+
+statement ok
+RESET orkidea_aggregate_pushdown;
+
+statement ok
+DETACH o;
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_ag_t PURGE');
