@@ -1,7 +1,7 @@
 extension:
   name: orkidea
   description: Query, attach, and write to Oracle Database, with no Oracle client to install
-  version: 0.1.0
+  version: 0.2.0
   language: C++
   build: cmake
   license: Apache-2.0
@@ -34,7 +34,7 @@ docs:
     INSERT INTO ora.dept VALUES (50, 'RESEARCH', 'BOSTON') ON CONFLICT DO NOTHING;
 
     -- Or run Oracle SQL directly
-    FROM orkidea_query('ora', 'SELECT * FROM v$version');
+    FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = :dept', params := {'dept': 10});
     FROM orkidea_execute('ora', 'BEGIN dbms_stats.gather_table_stats(USER, ''EMP''); END;');
   extended_description: |
     Orkidea connects DuckDB to Oracle Database through the
@@ -47,8 +47,8 @@ docs:
 
     - **Secrets**: host/port/service, full connect strings, TNS aliases from
       `tnsnames.ora`, wallets, and TLS.
-    - **ATTACH**: browse schemas and tables; filters, projections, `LIMIT`, and
-      top-N queries are pushed down to Oracle.
+    - **ATTACH**: browse schemas and tables; filters, projections, `LIMIT`,
+      top-N queries, and `GROUP BY` aggregates are pushed down to Oracle.
     - **Parallel scans**: large tables are split into ROWID ranges read by
       several sessions at one SCN, so the result is a consistent snapshot.
     - **Writes**: `INSERT` (bulk array DML), `CREATE TABLE ... AS`, `UPDATE`,
@@ -56,6 +56,7 @@ docs:
       all inside DuckDB transactions.
     - **Federation**: join Oracle tables with Postgres, Parquet, or any other
       source DuckDB reads.
-    - `orkidea_query` and `orkidea_execute` run Oracle SQL and PL/SQL directly.
+    - `orkidea_query` and `orkidea_execute` run Oracle SQL and PL/SQL directly,
+      with bind parameters.
 
     Not affiliated with, sponsored by, or endorsed by Oracle Corporation.

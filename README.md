@@ -4,7 +4,7 @@ A DuckDB extension for Oracle Database, built on the
 [Orkidea ADBC driver](https://github.com/Tnsor-Labs/orkidea-adbc). It is not
 affiliated with, sponsored by, or endorsed by Oracle Corporation.
 
-**Status:** version 0.1.0. Once it is published in the DuckDB community
+**Status:** version 0.2.0 (see the [changelog](CHANGELOG.md)). Once it is published in the DuckDB community
 extensions repository, install it with:
 
 ```sql
