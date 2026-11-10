@@ -26,13 +26,20 @@ SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHE
 2	n2
 3	n3
 
+# In SQL each use of a placeholder is a bind; one field binds every use.
+query II
+SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHERE id = :v OR id = :v * 10 ORDER BY id', params := {'v': 4});
+----
+4	n4
+40	n40
+
 # Unquoted placeholder names match case-insensitively.
 query I
 SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_qp_t WHERE name = :NAME', params := {'name': 'n7'});
 ----
 1
 
-# --- By position: row(...) binds :1, :2, ... in order of first appearance ---
+# --- By position: row(...) binds the placeholders in order, one value per use ---
 
 query II
 SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHERE id > :a AND name LIKE :b ORDER BY id', params := row(97, 'n%'));
@@ -40,6 +47,12 @@ SELECT id, name FROM orkidea_query('ora', 'SELECT id, name FROM orkidea_qp_t WHE
 98	n98
 99	n99
 100	n100
+
+query I
+SELECT id FROM orkidea_query('ora', 'SELECT id FROM orkidea_qp_t WHERE id = :v OR id = :v ORDER BY id', params := row(3, 5));
+----
+3
+5
 
 # --- Each DuckDB type binds as the matching Oracle type ---
 

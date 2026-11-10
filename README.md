@@ -259,8 +259,9 @@ FROM orkidea_query('ora', $$SELECT ename FROM emp WHERE job = 'CLERK'$$);
 
 Bind values to the query's placeholders with `params`. Values travel to Oracle
 as binds, never as SQL text, so they need no quoting or escaping, and Oracle
-reuses one cursor for every value. A STRUCT binds by name and a `row(...)` by
-position (`:1`, `:2`, ... in order of first appearance):
+reuses one cursor for every value. A STRUCT binds by name, and a placeholder
+used more than once takes the same value each time. A `row(...)` binds by
+position, one value per placeholder in the order they appear:
 
 ```sql
 FROM orkidea_query('ora', 'SELECT * FROM emp WHERE deptno = :dept AND hiredate >= :since',
@@ -283,8 +284,6 @@ Things to know:
   bind it without its time zone. Bind its UTC time instead,
   `params := {'t': ts AT TIME ZONE 'UTC'}`, and convert it with
   `FROM_TZ(CAST(:t AS TIMESTAMP), 'UTC')`.
-- To bind by name, give each placeholder its own name: a name used twice in
-  one query fails. By position, pass one value per use.
 
 Run DDL, DML, or PL/SQL. The result is the number of rows affected:
 

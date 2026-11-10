@@ -5,8 +5,8 @@
 //
 // orkidea_query(target, sql [, params := ...]): runs a query on Oracle and
 // returns its rows. `params` binds the query's placeholders: a STRUCT by
-// name ({'id': 42} for :id), a row(...) by position (:1, :2, ... in order of
-// first appearance).
+// name ({'id': 42} for every :id), a row(...) by position (one value per
+// placeholder, in order).
 //===----------------------------------------------------------------------===//
 
 #pragma once

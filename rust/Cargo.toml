@@ -14,7 +14,7 @@ crate-type = ["staticlib"]
 [dependencies]
 adbc_core = "0.25"
 adbc_ffi = "0.25"
-oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", rev = "a273c57224d76b3945e6b3ddd62561ff37ea2fac" }
+oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", rev = "6c24f0ff1ca1b1b7441f48ee81c93c9f6c0acf95" }
 
 # oracledb 26.0.0-beta.5 with the fixes the driver's own build uses (see its
 # Cargo.toml). Remove once a release includes them.
