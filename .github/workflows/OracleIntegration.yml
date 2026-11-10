@@ -1,0 +1,125 @@
+#
+# Builds the extension and runs its tests and the lab against Oracle Database
+# Free. The distribution pipeline builds every platform but has no database,
+# so the tests that need one (require-env ORKIDEA_TEST_URI) only run here.
+#
+name: Oracle Integration
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  oracle-integration:
+    name: tests and lab (Oracle Database Free 23ai)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # Oracle Database Free, pulled at CI time and never redistributed.
+      # Pinned by digest, as in the driver's CI; update deliberately.
+      ORACLE_IMAGE: gvenzl/oracle-free@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093
+      # The release CLI and the build must agree on the DuckDB version.
+      OVERRIDE_GIT_DESCRIBE: v2.0.0
+      GEN: ninja
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
+        with:
+          key: oracle-integration-${{ hashFiles('.gitmodules', 'extension_config.cmake') }}
+          max-size: 2G
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Start Oracle Database Free
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::${password}"
+          docker run -d --name oracle -p 127.0.0.1:1521:1521 \
+            -e ORACLE_PASSWORD="${password}" \
+            -e APP_USER=orkidea_test -e APP_USER_PASSWORD="${password}" \
+            "${ORACLE_IMAGE}"
+          {
+            echo "ORACLE_ADMIN_PASSWORD=${password}"
+            echo "ORKIDEA_TEST_URI=oracle://orkidea_test:${password}@127.0.0.1:1521/FREEPDB1"
+          } >> "${GITHUB_ENV}"
+      - name: Build the extension while the database starts
+        run: make release
+      - name: Wait for the database
+        run: |
+          for _ in $(seq 1 90); do
+            if docker logs oracle 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs oracle 2>&1 | tail -50
+          exit 1
+      - name: Grant test privileges
+        run: |
+          docker exec -i oracle sqlplus -s -L "sys/${ORACLE_ADMIN_PASSWORD}@FREEPDB1 as sysdba" <<'SQL'
+          WHENEVER SQLERROR EXIT FAILURE
+          GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE,
+                CREATE SEQUENCE TO orkidea_test;
+          ALTER USER orkidea_test QUOTA UNLIMITED ON USERS;
+          -- Parallel scans read AS OF a change number, with cut points from
+          -- DBA_EXTENTS.
+          GRANT EXECUTE ON DBMS_FLASHBACK TO orkidea_test;
+          GRANT FLASHBACK ANY TABLE TO orkidea_test;
+          GRANT SELECT_CATALOG_ROLE TO orkidea_test;
+          SQL
+      - name: Run the tests against Oracle
+        run: build/release/test/unittest 'test/*'
+
+      - name: Set up the lab
+        run: |
+          # The lab's own database, as lab/setup.sh starts it for users.
+          ORKIDEA_LAB_IMAGE="${ORACLE_IMAGE}" lab/setup.sh
+      - name: Run the lab's SQL modules
+        env:
+          ORKIDEA_DUCKDB: ${{ github.workspace }}/build/release/duckdb
+        run: |
+          set -euo pipefail
+          for module in lab/0[1-8]_*.sql; do
+            name="$(basename "${module}")"
+            echo "::group::${name}"
+            # -bail stops at the first error, and the shell's status is then
+            # nonzero.
+            lab/orkidea-lab.sh -bail -c ".read ${name}" | tee "lab-${name}.log"
+            echo "::endgroup::"
+            if grep -qE '(^|[^a-z])Error:' "lab-${name}.log"; then
+              echo "::error::${name} printed an error"
+              exit 1
+            fi
+          done
+      - name: Run the lab's Python module
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          .venv/bin/pip install "adbc-driver-orkidea[dbapi]>=0.2"
+          set -a; source lab/.lab.env; set +a
+          .venv/bin/python lab/09_python.py
+      - name: Tear down the lab
+        if: always()
+        run: lab/teardown.sh || true
