@@ -17,6 +17,9 @@ Until then, build it from source (see [Building](#building)).
 **Try it:** the [lab](lab/README.md) starts an Oracle database in a container
 and walks through every feature below, from a first query to writes, bind
 parameters, parallel scans, and Python, in short modules with expected results.
+[Benchmarks](bench/README.md) on the lab's data compare it with DuckDB's
+`oracle` extension: a million-row table copies into DuckDB in 1.1 s instead
+of 13.4 s, and a `GROUP BY` over it runs in 0.19 s instead of 6.2 s.
 
 - No Oracle Instant Client, OCI, or ODBC: the driver speaks Oracle's network
   protocol itself and is linked into the extension.
@@ -122,6 +125,10 @@ one session, without a warning, when:
 
 - it is a view, or an index-organized, clustered, or temporary table;
 - the query has a `LIMIT` or `ORDER BY ... LIMIT` that Oracle runs;
+- its equality and `IN` filters leave fewer rows than
+  `orkidea_parallel_scan_min_rows`, estimated from the columns' distinct
+  values in Oracle's statistics, and the number of sessions is left to the
+  scan;
 - the user cannot call `DBMS_FLASHBACK` (`GRANT EXECUTE ON DBMS_FLASHBACK`);
 - Oracle refuses the flashback read: no `FLASHBACK` privilege on another
   user's table, or a table created or altered within the last few seconds

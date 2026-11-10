@@ -38,6 +38,15 @@ Orkidea 0.2.0 runs aggregates in Oracle and binds parameters in
   `FILTER`) stay in DuckDB, as does any query Oracle rejects. `EXPLAIN` shows
   the Oracle SQL.
 
+- **A selective filter is read through one session** -- @hc12r. A
+  parallel scan first takes a change number and plans ROWID ranges, which
+  costs more than it saves when few rows come back. A scan now uses one
+  session when its equality and `IN` filters leave fewer rows than
+  `orkidea_parallel_scan_min_rows`, estimated from the columns' distinct
+  values in Oracle's statistics; one customer's 50 orders out of a million
+  take 49 ms instead of 180 ms. A number of sessions set with
+  `orkidea_parallel_scan` is used as set.
+
 ### Oracle SQL
 
 - **`orkidea_query` and `orkidea_execute` take `params`** -- @hc12r. A
@@ -59,6 +68,9 @@ Orkidea 0.2.0 runs aggregates in Oracle and binds parameters in
 
 ### Documentation
 
+- **Benchmarks** -- @hc12r. `bench/run.py` compares orkidea with DuckDB's
+  `oracle` extension, and the Orkidea driver with python-oracledb, on the
+  lab's data; [bench/README.md](bench/README.md) has the results.
 - **A hands-on lab** -- @hc12r. `lab/setup.sh` starts Oracle Database Free in a
   container with seeded data, and nine modules cover exploring, pushdown,
   aggregates, parallel scans, writes, Oracle SQL with parameters, federation,
