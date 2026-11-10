@@ -1,5 +1,6 @@
 #include "storage/orkidea_catalog.hpp"
 
+#include "orkidea_insert.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_schema_entry.hpp"
 #include "storage/orkidea_transaction.hpp"
@@ -18,7 +19,7 @@ namespace {
 constexpr const char *SESSION_SETUP = "ALTER SESSION SET NLS_COMP = BINARY NLS_SORT = BINARY";
 
 constexpr const char *WRITES_NOT_SUPPORTED =
-    "Writing to an attached Oracle database is not supported yet; use orkidea_execute";
+    "UPDATE and DELETE on an attached Oracle database are not supported yet; use orkidea_execute";
 
 } // namespace
 
@@ -41,7 +42,8 @@ shared_ptr<Connection> ConnectionPool::Acquire() {
 	weak_ptr<ConnectionPool> pool = shared_from_this();
 	auto result = shared_ptr<Connection>(connection.release(), [pool](Connection *returned) {
 		unique_ptr<Connection> owned(returned);
-		if (auto live = pool.lock()) {
+		auto live = pool.lock();
+		if (live && owned->reusable) {
 			live->Release(std::move(owned));
 		}
 	});
@@ -164,14 +166,14 @@ optional_ptr<SchemaCatalogEntry> OrkideaCatalog::LookupSchema(CatalogTransaction
 	return schema.get();
 }
 
-PhysicalOperator &OrkideaCatalog::PlanCreateTableAs(ClientContext &, PhysicalPlanGenerator &, LogicalCreateTable &,
-                                                    PhysicalOperator &) {
-	throw NotImplementedException(WRITES_NOT_SUPPORTED);
+PhysicalOperator &OrkideaCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                    LogicalCreateTable &op, PhysicalOperator &plan) {
+	return OrkideaInsert::PlanCreateTableAs(context, planner, op, plan);
 }
 
-PhysicalOperator &OrkideaCatalog::PlanInsert(ClientContext &, PhysicalPlanGenerator &, LogicalInsert &,
-                                             optional_ptr<PhysicalOperator>) {
-	throw NotImplementedException(WRITES_NOT_SUPPORTED);
+PhysicalOperator &OrkideaCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                             optional_ptr<PhysicalOperator> plan) {
+	return OrkideaInsert::PlanInsert(context, planner, op, plan);
 }
 
 PhysicalOperator &OrkideaCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
@@ -182,6 +184,14 @@ PhysicalOperator &OrkideaCatalog::PlanDelete(ClientContext &, PhysicalPlanGenera
 PhysicalOperator &OrkideaCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,
                                              PhysicalOperator &) {
 	throw NotImplementedException(WRITES_NOT_SUPPORTED);
+}
+
+void OrkideaCatalog::ForgetTable(const string &schema, const string &table) {
+	lock_guard<mutex> guard(schemas_lock);
+	auto entry = schemas.find(schema);
+	if (entry != schemas.end()) {
+		entry->second->ForgetTable(table);
+	}
 }
 
 DatabaseSize OrkideaCatalog::GetDatabaseSize(ClientContext &) {

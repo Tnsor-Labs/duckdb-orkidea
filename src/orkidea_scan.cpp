@@ -172,8 +172,10 @@ struct TableScanLocalState : public LocalTableFunctionState {
 
 //! How many sessions a scan of the table should use: 1 for a single stream.
 idx_t ScanSessions(ClientContext &context, const TableScanBindData &bind_data) {
-	// A pushed LIMIT or order needs one ordered stream.
-	if (!bind_data.table->splittable || bind_data.row_limit.IsValid() || !bind_data.order_by.empty()) {
+	// A pushed LIMIT or order needs one ordered stream, and rows a
+	// transaction wrote are seen only by its own session.
+	if (!bind_data.table->splittable || bind_data.row_limit.IsValid() || !bind_data.order_by.empty() ||
+	    OrkideaTransaction::Get(context, bind_data.catalog).HasWritten()) {
 		return 1;
 	}
 	Value setting;

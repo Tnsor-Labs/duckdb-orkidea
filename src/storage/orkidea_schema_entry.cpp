@@ -7,7 +7,14 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table/arrow.hpp"
+#include "orkidea_insert.hpp"
+
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 namespace duckdb {
 namespace orkidea {
@@ -211,8 +218,123 @@ void OrkideaSchemaEntry::Scan(CatalogType type, const std::function<void(Catalog
 	}
 }
 
-optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateTable(CatalogTransaction, BoundCreateTableInfo &) {
-	ThrowNotSupported("Creating tables");
+namespace {
+
+//! Refuses what a CREATE TABLE in Oracle would not carry over.
+void CheckCreatable(const CreateTableInfo &info) {
+	for (auto &column : info.columns.Logical()) {
+		if (column.Generated()) {
+			throw NotImplementedException("Generated columns are not supported in Oracle tables created from DuckDB; "
+			                              "create the table with orkidea_execute");
+		}
+		if (column.HasDefaultValue()) {
+			throw NotImplementedException("Column defaults are not supported in Oracle tables created from DuckDB; "
+			                              "create the table with orkidea_execute");
+		}
+	}
+	for (auto &constraint : info.constraints) {
+		if (constraint->type != ConstraintType::NOT_NULL && constraint->type != ConstraintType::UNIQUE) {
+			throw NotImplementedException("Only NOT NULL, PRIMARY KEY, and UNIQUE constraints are supported in Oracle "
+			                              "tables created from DuckDB; create the table with orkidea_execute");
+		}
+	}
+}
+
+//! The ALTER TABLE statements that add the table's constraints, with column
+//! names as Oracle stores them.
+vector<string> ConstraintStatements(const CreateTableInfo &info, const OracleTable &table) {
+	vector<string> statements;
+	auto prefix = "ALTER TABLE " + table.QualifiedName();
+	for (auto &constraint : info.constraints) {
+		if (constraint->type == ConstraintType::NOT_NULL) {
+			auto &not_null = constraint->Cast<NotNullConstraint>();
+			statements.push_back(prefix + " MODIFY (" + QuoteIdentifier(table.column_names[not_null.index.index]) +
+			                     " NOT NULL)");
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		vector<string> columns;
+		for (auto &index : unique.GetLogicalIndexes(info.columns)) {
+			columns.push_back(QuoteIdentifier(table.column_names[index.index]));
+		}
+		statements.push_back(prefix + (unique.IsPrimaryKey() ? " ADD PRIMARY KEY (" : " ADD UNIQUE (") +
+		                     StringUtil::Join(columns, ", ") + ")");
+	}
+	return statements;
+}
+
+} // namespace
+
+optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateTable(CatalogTransaction transaction,
+                                                           BoundCreateTableInfo &bound_info) {
+	auto &context = transaction.GetContext();
+	auto &info = bound_info.Base();
+	auto table_name = info.GetTableName().GetIdentifierName();
+	CheckCreatable(info);
+
+	lock_guard<mutex> guard(lock);
+	auto existing = FindTable(context, table_name);
+	if (existing) {
+		switch (info.on_conflict) {
+		case OnCreateConflict::IGNORE_ON_CONFLICT:
+			return existing.get();
+		case OnCreateConflict::REPLACE_ON_CONFLICT:
+			DropTable(context, *existing, false);
+			break;
+		default:
+			throw CatalogException("Table \"%s\" already exists in Oracle schema %s", table_name,
+			                       name.GetIdentifierName());
+		}
+	}
+
+	// The driver creates the table from an Arrow schema, with the type
+	// mapping it documents. DDL commits, so it runs on a session of its own.
+	vector<LogicalType> types;
+	vector<string> names;
+	for (auto &column : info.columns.Physical()) {
+		types.push_back(column.Type());
+		names.push_back(column.GetName().GetIdentifierName());
+	}
+	ColumnDataCollection no_rows(context, types);
+	ArrowArrayStream stream;
+	CollectionStream(context, no_rows, std::move(names), stream);
+	auto ddl = GetOrkideaCatalog().AcquireConnection();
+	Statement create(ddl);
+	create.SetOption(ADBC_INGEST_OPTION_TARGET_TABLE, table_name);
+	create.SetOption("adbc.ingest.target_db_schema", QuoteIdentifier(name.GetIdentifierName()));
+	create.SetOption(ADBC_INGEST_OPTION_MODE, ADBC_INGEST_OPTION_MODE_CREATE);
+	create.BindStream(stream);
+	create.ExecuteUpdate();
+
+	auto created = FindTable(context, table_name);
+	if (!created) {
+		throw InternalException("Oracle table %s was created but cannot be found", table_name);
+	}
+	auto &oracle_table = created->GetOracleTable();
+	OrkideaTransaction::Get(context, ParentCatalog()).AddCreatedTable(oracle_table.schema, oracle_table.name);
+	try {
+		for (auto &statement : ConstraintStatements(info, oracle_table)) {
+			ExecuteStatement(context, ddl, statement);
+		}
+	} catch (...) {
+		DropTable(context, *created, true);
+		throw;
+	}
+	return created.get();
+}
+
+void OrkideaSchemaEntry::DropTable(ClientContext &context, OrkideaTableEntry &table, bool purge) {
+	auto oracle_name = table.GetOracleTable().name;
+	ExecuteStatement(context, GetOrkideaCatalog().AcquireConnection(),
+	                 "DROP TABLE " + table.GetOracleTable().QualifiedName() + (purge ? " PURGE" : ""));
+	tables.erase(oracle_name);
+	table_names.erase(oracle_name);
+}
+
+void OrkideaSchemaEntry::ForgetTable(const string &oracle_name) {
+	lock_guard<mutex> guard(lock);
+	tables.erase(oracle_name);
+	table_names.erase(oracle_name);
 }
 
 optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateFunction(CatalogTransaction, CreateFunctionInfo &) {
@@ -255,8 +377,26 @@ void OrkideaSchemaEntry::Alter(CatalogTransaction, AlterInfo &) {
 	ThrowNotSupported("Altering tables");
 }
 
-void OrkideaSchemaEntry::DropEntry(ClientContext &, DropInfo &) {
-	ThrowNotSupported("Dropping tables");
+void OrkideaSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+	if (info.type != CatalogType::TABLE_ENTRY) {
+		ThrowNotSupported("Dropping anything but tables");
+	}
+	auto table_name = info.GetQualifiedName().Name().GetIdentifierName();
+	lock_guard<mutex> guard(lock);
+	auto table = FindTable(context, table_name);
+	if (!table) {
+		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return;
+		}
+		throw CatalogException("Table \"%s\" does not exist in Oracle schema %s", table_name, name.GetIdentifierName());
+	}
+	// Not purged: a dropped table stays in Oracle's recycle bin, from which
+	// FLASHBACK TABLE ... TO BEFORE DROP restores it.
+	auto oracle_name = table->GetOracleTable().name;
+	auto sql = "DROP TABLE " + table->GetOracleTable().QualifiedName() + (info.cascade ? " CASCADE CONSTRAINTS" : "");
+	ExecuteStatement(context, GetOrkideaCatalog().AcquireConnection(), sql);
+	tables.erase(oracle_name);
+	table_names.erase(oracle_name);
 }
 
 } // namespace orkidea

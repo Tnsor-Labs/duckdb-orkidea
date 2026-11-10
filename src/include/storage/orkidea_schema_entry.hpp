@@ -54,6 +54,9 @@ public:
 	void Alter(CatalogTransaction transaction, AlterInfo &info) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 
+	//! Drops a table from the cache, after it was dropped in Oracle.
+	void ForgetTable(const string &oracle_name);
+
 private:
 	OrkideaCatalog &GetOrkideaCatalog();
 	//! Lists the names of the schema's tables, once.
@@ -63,6 +66,8 @@ private:
 	//! The table a DuckDB name refers to, described on first use.
 	optional_ptr<OrkideaTableEntry> FindTable(ClientContext &context, const string &name);
 	optional_ptr<OrkideaTableEntry> DescribeTable(ClientContext &context, const string &oracle_name);
+	//! Drops a table in Oracle and from the cache. The lock must be held.
+	void DropTable(ClientContext &context, OrkideaTableEntry &table, bool purge);
 
 	mutex lock;
 	bool tables_listed = false;

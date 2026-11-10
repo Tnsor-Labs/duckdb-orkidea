@@ -48,8 +48,8 @@ SHOW ALL TABLES;
 - Names match case-insensitively. An exact match comes first, then the
   unquoted (upper-case) Oracle name.
 - Tables are described on first use and cached until `DETACH`.
-- Each DuckDB transaction runs on one Oracle connection. Writing through the
-  attached database is not supported yet; use `orkidea_execute`.
+- Each DuckDB transaction runs on one Oracle connection. Tables can be
+  created, filled, and dropped; see [Writing](#writing).
 
 Scans read only the columns a query needs, and push work into Oracle when
 Oracle gives exactly the result DuckDB would:
@@ -98,6 +98,48 @@ one session, without a warning, when:
 
 A scan that runs longer than the database's undo retention can fail with
 ORA-01555.
+
+### Writing
+
+```sql
+CREATE TABLE oracle.items (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, price DECIMAL(10,2));
+INSERT INTO oracle.items VALUES (1, 'tea', 3.50);
+INSERT INTO oracle.items (id, name) SELECT id, name FROM 'items.parquet';
+CREATE TABLE oracle.shipments AS FROM pg.logistics.shipments;   -- Postgres to Oracle
+DROP TABLE oracle.items;
+```
+
+Rows go to Oracle through the driver's bulk ingest (array DML), in batches
+of up to 1,048,576 rows: 900,000 rows from Postgres into a new Oracle table
+took 8.3 s here. Each batch is applied whole or not at all, and a failed
+statement rolls back every row it inserted.
+
+- **Transactions.** A DuckDB transaction's writes are one Oracle
+  transaction, on one session: `COMMIT` commits them, `ROLLBACK` undoes them,
+  and the transaction's own queries see them (through that session, so they
+  are not read in parallel). A statement outside `BEGIN` commits on its own.
+- **Columns you do not name** in an `INSERT` are left to Oracle, so its
+  `DEFAULT` values and identity columns apply. Virtual columns are always
+  left to Oracle. (A defaulted column given NULL in every row of a batch
+  also takes its default.)
+- **Names.** DuckDB names that are valid unquoted Oracle names become
+  upper-case Oracle names (`items` → `ITEMS`); others are kept exactly.
+  Existing Oracle tables, mixed-case ones included, are written to by their
+  exact names.
+- **Types** of new tables follow the driver's
+  [mapping](https://github.com/Tnsor-Labs/orkidea-adbc/blob/main/docs/type-support.md#column-types-for-create):
+  `VARCHAR` becomes `VARCHAR2(4000)`, `BIGINT` becomes `NUMBER(19)` (which
+  reads back as `DECIMAL(19,0)`), `TIMESTAMPTZ` becomes `TIMESTAMP WITH
+  TIME ZONE`, and so on. `CREATE TABLE` carries `NOT NULL`, `PRIMARY KEY`,
+  and `UNIQUE`; for other constraints or defaults, create the table with
+  `orkidea_execute`.
+- **DDL.** Oracle commits DDL immediately, so `CREATE` and `DROP` run on a
+  session of their own and do not commit your transaction's other writes. A
+  table created in a transaction that rolls back is dropped again. A dropped
+  table goes to Oracle's recycle bin (`FLASHBACK TABLE ... TO BEFORE DROP`
+  restores it); `DROP` is not undone by `ROLLBACK`.
+- **Not supported yet:** `UPDATE`, `DELETE`, `INSERT ... RETURNING`,
+  `ON CONFLICT`, `DEFAULT VALUES`, and `ALTER TABLE`. Use `orkidea_execute`.
 
 To see the SQL sent to Oracle:
 

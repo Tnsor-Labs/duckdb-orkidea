@@ -108,6 +108,26 @@ Connection::Connection(shared_ptr<Database> database_p) : handle {}, database(st
 	}
 }
 
+void Connection::SetOption(const string &key, const string &value) {
+	ErrorScope error;
+	Check(Driver().ConnectionSetOption(&handle, key.c_str(), value.c_str(), error.Get()), error,
+	      "setting a connection option");
+}
+
+void Connection::SetAutocommit(bool autocommit) {
+	SetOption(ADBC_CONNECTION_OPTION_AUTOCOMMIT, autocommit ? ADBC_OPTION_VALUE_ENABLED : ADBC_OPTION_VALUE_DISABLED);
+}
+
+void Connection::Commit() {
+	ErrorScope error;
+	Check(Driver().ConnectionCommit(&handle, error.Get()), error, "committing");
+}
+
+void Connection::Rollback() {
+	ErrorScope error;
+	Check(Driver().ConnectionRollback(&handle, error.Get()), error, "rolling back");
+}
+
 Connection::~Connection() {
 	ErrorScope error;
 	Driver().ConnectionRelease(&handle, error.Get());
@@ -132,6 +152,11 @@ void Statement::SetOption(const string &key, const string &value) {
 	ErrorScope error;
 	Check(Driver().StatementSetOption(&handle, key.c_str(), value.c_str(), error.Get()), error,
 	      "setting a statement option");
+}
+
+void Statement::BindStream(ArrowArrayStream &stream) {
+	ErrorScope error;
+	Check(Driver().StatementBindStream(&handle, &stream, error.Get()), error, "binding rows");
 }
 
 void Statement::ExecuteSchema(ArrowSchema &schema) {

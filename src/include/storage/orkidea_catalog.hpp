@@ -88,6 +88,8 @@ public:
 	const DatabaseInfo &GetDatabaseInfo() const {
 		return info;
 	}
+	//! Drops a table from the cache, after it was dropped in Oracle.
+	void ForgetTable(const string &schema, const string &table);
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;

@@ -1,5 +1,6 @@
 #include "storage/orkidea_transaction.hpp"
 
+#include "orkidea_util.hpp"
 #include "storage/orkidea_catalog.hpp"
 
 namespace duckdb {
@@ -19,14 +20,62 @@ shared_ptr<Connection> OrkideaTransaction::GetConnection() {
 	return connection;
 }
 
-void OrkideaTransaction::Commit() {
+shared_ptr<Connection> OrkideaTransaction::GetWriteConnection() {
+	auto result = GetConnection();
 	lock_guard<mutex> guard(lock);
+	if (!written) {
+		result->SetAutocommit(false);
+		written = true;
+	}
+	return result;
+}
+
+bool OrkideaTransaction::HasWritten() {
+	lock_guard<mutex> guard(lock);
+	return written;
+}
+
+void OrkideaTransaction::AddCreatedTable(string schema, string table) {
+	lock_guard<mutex> guard(lock);
+	created_tables.emplace_back(std::move(schema), std::move(table));
+}
+
+void OrkideaTransaction::Finish(bool commit) {
+	lock_guard<mutex> guard(lock);
+	if (written) {
+		// The connection goes back to the pool in autocommit mode, or, if
+		// ending the transaction fails, not at all.
+		auto finishing = std::move(connection);
+		written = false;
+		finishing->reusable = false;
+		if (commit) {
+			finishing->Commit();
+		} else {
+			finishing->Rollback();
+		}
+		finishing->SetAutocommit(true);
+		finishing->reusable = true;
+	}
 	connection.reset();
+	if (!commit && !created_tables.empty()) {
+		auto ddl = catalog.AcquireConnection();
+		for (auto &table : created_tables) {
+			Statement drop(ddl);
+			drop.SetSqlQuery("DROP TABLE " + QuoteIdentifier(table.first) + "." + QuoteIdentifier(table.second) +
+			                 " PURGE");
+			drop.ExecuteUpdate();
+			catalog.ForgetTable(table.first, table.second);
+		}
+	}
+	created_tables.clear();
+}
+
+void OrkideaTransaction::Commit() {
+	Finish(true);
 }
 
 void OrkideaTransaction::Rollback() {
-	lock_guard<mutex> guard(lock);
-	connection.reset();
+	Finish(false);
 }
 
 OrkideaTransaction &OrkideaTransaction::Get(ClientContext &context, Catalog &catalog) {

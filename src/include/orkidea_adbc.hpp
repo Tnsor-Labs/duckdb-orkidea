@@ -41,7 +41,16 @@ public:
 	Connection(const Connection &) = delete;
 	Connection &operator=(const Connection &) = delete;
 
+	void SetOption(const string &key, const string &value);
+	//! With autocommit off, statements form one transaction until Commit or Rollback.
+	void SetAutocommit(bool autocommit);
+	void Commit();
+	void Rollback();
+
 	AdbcConnection handle;
+	//! False once the session may be left in a state a later user would not
+	//! expect (a transaction that failed to end); a pool then closes it.
+	bool reusable = true;
 
 private:
 	shared_ptr<Database> database;
@@ -56,6 +65,8 @@ public:
 
 	void SetSqlQuery(const string &sql);
 	void SetOption(const string &key, const string &value);
+	//! Binds rows to insert, for bulk ingest. The statement takes the stream.
+	void BindStream(ArrowArrayStream &stream);
 	//! Describes the result set of the query without running it.
 	void ExecuteSchema(ArrowSchema &schema);
 	//! Runs the query. The stream must be released before the statement.

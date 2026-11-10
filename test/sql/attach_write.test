@@ -1,0 +1,258 @@
+# name: test/sql/attach_write.test
+# description: CREATE TABLE, INSERT, CREATE TABLE AS, DROP, and transactions on an attached Oracle database.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_DW\_%'' ESCAPE ''\'' OR table_name = ''OrkideaDwMixed'') LOOP EXECUTE IMMEDIATE ''DROP TABLE "'' || t.table_name || ''" PURGE''; END LOOP; END;');
+
+statement ok
+ATTACH 'ora' AS o (TYPE orkidea);
+
+# --- CREATE TABLE ---
+
+statement ok
+CREATE TABLE o.orkidea_dw_items (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, amount DECIMAL(10,2), at_time TIMESTAMP, flag BOOLEAN);
+
+query TTT
+FROM orkidea_query('ora', 'SELECT column_name, data_type, nullable FROM user_tab_columns WHERE table_name = ''ORKIDEA_DW_ITEMS'' ORDER BY column_id');
+----
+ID	NUMBER	N
+NAME	VARCHAR2	N
+AMOUNT	NUMBER	Y
+AT_TIME	TIMESTAMP(6)	Y
+FLAG	BOOLEAN	Y
+
+query I
+FROM orkidea_query('ora', 'SELECT COUNT(*) FROM user_constraints WHERE table_name = ''ORKIDEA_DW_ITEMS'' AND constraint_type = ''P''');
+----
+1
+
+statement error
+CREATE TABLE o.orkidea_dw_items (id INTEGER);
+----
+already exists
+
+statement ok
+CREATE TABLE IF NOT EXISTS o.orkidea_dw_items (id INTEGER);
+
+statement error
+CREATE TABLE o.orkidea_dw_checked (id INTEGER CHECK (id > 0));
+----
+Only NOT NULL, PRIMARY KEY, and UNIQUE constraints are supported
+
+statement error
+CREATE TABLE o.orkidea_dw_defaulted (id INTEGER DEFAULT 1);
+----
+Column defaults are not supported
+
+# --- INSERT ---
+
+query I
+INSERT INTO o.orkidea_dw_items VALUES (1, 'one', 1.50, TIMESTAMP '2024-01-01 10:00:00', true), (2, 'two', NULL, NULL, false);
+----
+2
+
+query ITRTT
+FROM o.orkidea_dw_items ORDER BY id;
+----
+1	one	1.50	2024-01-01 10:00:00	true
+2	two	NULL	NULL	false
+
+# Two flushes of the insert buffer (1,048,576 rows each).
+query I
+INSERT INTO o.orkidea_dw_items SELECT i, 'item ' || i, (i % 100000) / 100, TIMESTAMP '2024-01-01' + INTERVAL (i) SECOND, i % 2 = 0 FROM range(3, 1100003) t(i);
+----
+1100000
+
+query I
+SELECT (SELECT (count(*), sum(id), sum(amount), count(*) FILTER (WHERE flag), max(at_time)) FROM o.orkidea_dw_items WHERE id >= 3)
+     = (SELECT (count(*), sum(i), sum(((i % 100000) / 100)::DECIMAL(10,2)), count(*) FILTER (WHERE i % 2 = 0), max(TIMESTAMP '2024-01-01' + INTERVAL (i) SECOND)) FROM range(3, 1100003) t(i));
+----
+true
+
+# A failing insert inserts nothing, however many rows came before the failure.
+statement error
+INSERT INTO o.orkidea_dw_items SELECT i, 'duplicate', 0, NULL, NULL FROM range(-100, 2) t(i);
+----
+ORA-00001
+
+query I
+SELECT count(*) FROM o.orkidea_dw_items WHERE name = 'duplicate';
+----
+0
+
+statement error
+INSERT INTO o.orkidea_dw_items (id) VALUES (10);
+----
+ORA-01400
+
+# --- Transactions ---
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO o.orkidea_dw_items VALUES (-1, 'rolled back', 0, NULL, NULL);
+
+# The transaction reads its own rows, through its own session.
+query I
+SELECT count(*) FROM o.orkidea_dw_items WHERE id = -1;
+----
+1
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM o.orkidea_dw_items WHERE id = -1;
+----
+0
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO o.orkidea_dw_items VALUES (-2, 'committed', 0, NULL, NULL);
+
+statement ok
+COMMIT;
+
+query I
+FROM orkidea_query('ora', 'SELECT COUNT(*) FROM orkidea_dw_items WHERE id = -2');
+----
+1
+
+# A table created in a transaction that rolls back is dropped again.
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE o.orkidea_dw_temp AS SELECT 1 AS id;
+
+statement ok
+ROLLBACK;
+
+query I
+FROM orkidea_query('ora', 'SELECT COUNT(*) FROM user_tables WHERE table_name = ''ORKIDEA_DW_TEMP''');
+----
+0
+
+# --- Oracle defaults, identity, and virtual columns ---
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_dw_defaults (id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR2(20), status VARCHAR2(10) DEFAULT ''NEW'' NOT NULL, created DATE DEFAULT SYSDATE, doubled NUMBER(10) AS (LENGTH(name) * 2) VIRTUAL)');
+
+statement ok
+INSERT INTO o.orkidea_dw_defaults (name) VALUES ('a'), ('bb');
+
+statement ok
+INSERT INTO o.orkidea_dw_defaults (name, status) VALUES ('ccc', 'OLD');
+
+query ITTII
+SELECT id, name, status, created IS NOT NULL, doubled FROM o.orkidea_dw_defaults ORDER BY id;
+----
+1	a	NEW	true	2
+2	bb	NEW	true	4
+3	ccc	OLD	true	6
+
+statement error
+INSERT INTO o.orkidea_dw_defaults (name, doubled) VALUES ('d', 8);
+----
+Cannot insert into the virtual column DOUBLED
+
+# --- CREATE TABLE AS: every type the driver stores, and back ---
+
+statement ok
+CREATE TABLE source AS SELECT * FROM (VALUES
+    (1, true, 7::TINYINT, 300::SMALLINT, 70000, 9000000000::BIGINT, 12345.6789::DECIMAL(18,4), 1.5::DOUBLE, 2.5::FLOAT,
+     'ascii', 'Ünïcödé — 日本', '\x00\xFF'::BLOB, DATE '2024-02-29', TIMESTAMP '2024-02-29 12:34:56.123456',
+     TIMESTAMPTZ '2024-02-29 12:34:56+02'),
+    (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+) t(id, b, ti, si, i, bi, d, db, f, s, u, bl, dt, ts, tz);
+
+statement ok
+CREATE TABLE o.orkidea_dw_types AS FROM source;
+
+query I
+SELECT count(*) FROM source s JOIN o.orkidea_dw_types o ON o.id = s.id
+WHERE o.b IS NOT DISTINCT FROM s.b AND o.ti::TINYINT IS NOT DISTINCT FROM s.ti AND o.si::SMALLINT IS NOT DISTINCT FROM s.si
+  AND o.i::INTEGER IS NOT DISTINCT FROM s.i AND o.bi::BIGINT IS NOT DISTINCT FROM s.bi AND o.d IS NOT DISTINCT FROM s.d
+  AND o.db IS NOT DISTINCT FROM s.db AND o.f IS NOT DISTINCT FROM s.f AND o.s IS NOT DISTINCT FROM s.s
+  AND o.u IS NOT DISTINCT FROM s.u AND o.bl IS NOT DISTINCT FROM s.bl AND o.dt::DATE IS NOT DISTINCT FROM s.dt
+  AND o.ts IS NOT DISTINCT FROM s.ts AND o.tz IS NOT DISTINCT FROM s.tz;
+----
+2
+
+statement ok
+CREATE OR REPLACE TABLE o.orkidea_dw_types AS SELECT 42 AS answer;
+
+query I
+FROM o.orkidea_dw_types;
+----
+42
+
+# Oracle to Oracle, on the transaction's one session.
+statement ok
+CREATE TABLE o.orkidea_dw_copy AS SELECT * FROM o.orkidea_dw_items WHERE id BETWEEN 1 AND 1000;
+
+query I
+SELECT count(*) FROM o.orkidea_dw_copy;
+----
+1000
+
+# --- A mixed-case Oracle table, named exactly ---
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE "OrkideaDwMixed" ("Id" NUMBER(10), "Label" VARCHAR2(20))');
+
+statement ok
+INSERT INTO o."OrkideaDwMixed" VALUES (1, 'exact');
+
+query IT
+FROM orkidea_query('ora', 'SELECT "Id", "Label" FROM "OrkideaDwMixed"');
+----
+1	exact
+
+# --- DROP TABLE ---
+
+statement ok
+DROP TABLE o.orkidea_dw_copy;
+
+query I
+FROM orkidea_query('ora', 'SELECT COUNT(*) FROM user_tables WHERE table_name = ''ORKIDEA_DW_COPY''');
+----
+0
+
+statement ok
+DROP TABLE IF EXISTS o.orkidea_dw_copy;
+
+statement error
+DROP TABLE o.orkidea_dw_copy;
+----
+does not exist
+
+# --- A read-only attachment refuses writes ---
+
+statement ok
+DETACH o;
+
+statement ok
+ATTACH 'ora' AS r (TYPE orkidea, READ_ONLY);
+
+statement error
+INSERT INTO r.orkidea_dw_items VALUES (100, 'no', 0, NULL, NULL);
+----
+read-only
+
+statement ok
+DETACH r;
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_DW\_%'' ESCAPE ''\'' OR table_name = ''OrkideaDwMixed'') LOOP EXECUTE IMMEDIATE ''DROP TABLE "'' || t.table_name || ''" PURGE''; END LOOP; END;');
