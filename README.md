@@ -18,8 +18,8 @@ Until then, build it from source (see [Building](#building)).
 and walks through every feature below, from a first query to writes, bind
 parameters, parallel scans, and Python, in short modules with expected results.
 [Benchmarks](bench/README.md) on the lab's data compare it with DuckDB's
-`oracle` extension: a million-row table copies into DuckDB in 1.1 s instead
-of 13.4 s, and a `GROUP BY` over it runs in 0.19 s instead of 6.2 s.
+`oracle` extension: a million-row table copies into DuckDB in 0.63 s instead
+of 12.6 s, and a `GROUP BY` over it runs in 0.19 s instead of 5.3 s.
 
 - No Oracle Instant Client, OCI, or ODBC: the driver speaks Oracle's network
   protocol itself and is linked into the extension.

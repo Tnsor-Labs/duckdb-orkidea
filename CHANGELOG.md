@@ -13,8 +13,9 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 ## [0.2.0] - 2026-11-10
 
 Orkidea 0.2.0 runs aggregates in Oracle and binds parameters in
-`orkidea_query` and `orkidea_execute`. It is built on the Orkidea ADBC driver
-0.2.1, and tested against Oracle Database 23ai Free. A
+`orkidea_query` and `orkidea_execute`, and reads tables twice as fast. It is
+built on the Orkidea ADBC driver 0.3.0, and tested against Oracle Database
+23ai Free. A
 [hands-on lab](lab/README.md) walks through every feature.
 
 ### Behaviour changes to read before upgrading
@@ -61,10 +62,15 @@ Orkidea 0.2.0 runs aggregates in Oracle and binds parameters in
 
 ### Driver
 
-- **Built on the Orkidea ADBC driver 0.2.1** -- @hc12r. 0.2.0 reads faster
-  and fixes wide rows that could break a connection, schemas described from a
-  stale cache, quoted names, and `tnsnames.ora` aliases after a comment. See
-  its [release notes](https://github.com/Tnsor-Labs/orkidea-adbc/releases/tag/v0.2.0).
+- **Built on the Orkidea ADBC driver 0.3.0** -- @hc12r. 0.3.0 decodes
+  results from the network buffer straight into Arrow columns: copying a
+  million rows of seven columns into DuckDB takes 0.63 s, against 1.11 s
+  with driver 0.2.1, and 1.33 s against 3.29 s through one session. 0.2.0 read faster than
+  0.1.0, and fixed wide rows that could break a connection, schemas
+  described from a stale cache, quoted names, and `tnsnames.ora` aliases
+  after a comment. See the release notes of
+  [0.3.0](https://github.com/Tnsor-Labs/orkidea-adbc/releases/tag/v0.3.0) and
+  [0.2.0](https://github.com/Tnsor-Labs/orkidea-adbc/releases/tag/v0.2.0).
 
 ### Documentation
 

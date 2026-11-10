@@ -14,13 +14,14 @@ crate-type = ["staticlib"]
 [dependencies]
 adbc_core = "0.25"
 adbc_ffi = "0.25"
-oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", tag = "v0.2.1" }
+oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", tag = "v0.3.0" }
 
-# oracledb 26.0.0-beta.5 with the fixes the driver's own build uses (see its
-# Cargo.toml): oracle/rust-oracledb#80 and #83, in files marked as modified.
-# Remove once a release includes them.
+# oracledb 26.0.0-beta.5 as the driver's own build uses it (see its
+# Cargo.toml): the fixes for oracle/rust-oracledb#80 and #83, and row sinks
+# (#85), which the driver's columnar fetching reads with, in files marked as
+# modified. Remove once a release includes them.
 [patch.crates-io]
-oracledb = { git = "https://github.com/Tnsor-Labs/rust-oracledb", rev = "e7848e52031839c547ec086be7541f8e62b1c637" }
+oracledb = { git = "https://github.com/Tnsor-Labs/rust-oracledb", rev = "0f147cd6232be5b8a631a1cbcff94b7e0882cc2e" }
 
 [profile.release]
 lto = "thin"

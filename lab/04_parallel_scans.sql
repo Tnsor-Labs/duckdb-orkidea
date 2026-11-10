@@ -12,7 +12,7 @@ SET orkidea_parallel_scan = 4;
 CREATE OR REPLACE TABLE orders_four AS FROM oracle.orders;
 RESET orkidea_parallel_scan;
 CREATE OR REPLACE TABLE orders_local AS FROM oracle.orders;
--- → on a laptop: about 3 s, 1.4 s, and 1.1 s for a million rows
+-- → on a laptop: about 1.7 s, 1.2 s, and 0.8 s for a million rows
 
 .timer off
 

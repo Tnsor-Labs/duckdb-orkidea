@@ -674,7 +674,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "oracledb"
 version = "26.0.0-beta.5"
-source = "git+https://github.com/Tnsor-Labs/rust-oracledb?rev=e7848e52031839c547ec086be7541f8e62b1c637#e7848e52031839c547ec086be7541f8e62b1c637"
+source = "git+https://github.com/Tnsor-Labs/rust-oracledb?rev=0f147cd6232be5b8a631a1cbcff94b7e0882cc2e#0f147cd6232be5b8a631a1cbcff94b7e0882cc2e"
 dependencies = [
  "aes",
  "arrow-array",
@@ -695,8 +695,8 @@ dependencies = [
 
 [[package]]
 name = "orkidea-adbc"
-version = "0.2.1"
-source = "git+https://github.com/Tnsor-Labs/orkidea-adbc?tag=v0.2.1#e80e9ee58eabb0d4975015bdb78c0f9fb13712da"
+version = "0.3.0"
+source = "git+https://github.com/Tnsor-Labs/orkidea-adbc?tag=v0.3.0#240d3e142aaf99262ce921a8c0fb5498eea72609"
 dependencies = [
  "adbc_core",
  "arrow-array",

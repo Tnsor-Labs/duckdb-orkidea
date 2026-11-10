@@ -63,7 +63,7 @@ text is in LICENSE at the root of this repository.
   objc2-system-configuration 0.3.2: Zlib OR Apache-2.0 OR MIT
   once_cell 1.21.4: MIT OR Apache-2.0
   oracledb 26.0.0-beta.5: UPL-1.0 OR Apache-2.0
-  orkidea-adbc 0.2.1: Apache-2.0
+  orkidea-adbc 0.3.0: Apache-2.0
   pbkdf2 0.13.0: MIT OR Apache-2.0
   pem-rfc7468 1.0.0: Apache-2.0 OR MIT
   pkcs5 0.8.1: Apache-2.0 OR MIT
@@ -4177,7 +4177,7 @@ END OF TERMS AND CONDITIONS
 Copyright (c) 2026, Oracle and/or its affiliates.
 
 ==============================================================================
-orkidea-adbc 0.2.1
+orkidea-adbc 0.3.0
 ==============================================================================
 No license file; declared license: Apache-2.0.
 
