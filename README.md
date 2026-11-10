@@ -4,8 +4,15 @@ A DuckDB extension for Oracle Database, built on the
 [Orkidea ADBC driver](https://github.com/Tnsor-Labs/orkidea-adbc). It is not
 affiliated with, sponsored by, or endorsed by Oracle Corporation.
 
-**Status:** in development. It is not yet in the DuckDB community extensions
-repository, and its SQL interface may change before the first release.
+**Status:** version 0.1.0. Once it is published in the DuckDB community
+extensions repository, install it with:
+
+```sql
+INSTALL orkidea FROM community;
+LOAD orkidea;
+```
+
+Until then, build it from source (see [Building](#building)).
 
 - No Oracle Instant Client, OCI, or ODBC: the driver speaks Oracle's network
   protocol itself and is linked into the extension.
@@ -330,6 +337,16 @@ its matching branch, and the versions in
 `.github/workflows/MainDistributionPipeline.yml` to match. Extensions build
 against DuckDB's internal C++ API, which can change between releases.
 
+## Releasing
+
+`description.yml` is the extension's entry in the
+[community extensions repository](https://github.com/duckdb/community-extensions):
+bump `version` and set `repo.ref` to the released commit, then copy it to
+`extensions/orkidea/description.yml` there. After changing `rust/Cargo.lock`,
+regenerate `THIRD_PARTY_LICENSES.txt` with `scripts/third_party_licenses.py`.
+
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE). The extension statically links
+Rust crates under their own licenses; their texts are in
+[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).

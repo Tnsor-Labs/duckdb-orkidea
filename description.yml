@@ -1,0 +1,61 @@
+extension:
+  name: orkidea
+  description: Query, attach, and write to Oracle Database, with no Oracle client to install
+  version: 0.1.0
+  language: C++
+  build: cmake
+  license: Apache-2.0
+  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;linux_amd64_musl;linux_arm64_musl"
+  requires_toolchains: "rust"
+  maintainers:
+    - hc12r
+
+repo:
+  github: Tnsor-Labs/duckdb-orkidea
+  # The released commit; set in the community repository's copy.
+  ref: ""
+
+docs:
+  hello_world: |
+    -- Store the connection in a secret (or use CONNECT_STRING with a TNS alias)
+    CREATE SECRET ora (
+        TYPE orkidea,
+        HOST 'db.example.com', PORT 1521, SERVICE 'FREEPDB1',
+        USER 'scott', PASSWORD 'tiger'
+    );
+
+    -- Attach the database: filters, projections, LIMIT, and top-N run in Oracle
+    ATTACH 'ora' AS ora (TYPE orkidea);
+    SELECT ename, sal FROM ora.emp WHERE deptno = 10 ORDER BY sal DESC LIMIT 5;
+
+    -- Write to it, inside DuckDB transactions
+    CREATE TABLE ora.top_earners AS SELECT * FROM ora.emp WHERE sal > 3000;
+    UPDATE ora.emp SET sal = sal * 1.1 WHERE deptno = 20;
+    INSERT INTO ora.dept VALUES (50, 'RESEARCH', 'BOSTON') ON CONFLICT DO NOTHING;
+
+    -- Or run Oracle SQL directly
+    FROM orkidea_query('ora', 'SELECT * FROM v$version');
+    FROM orkidea_execute('ora', 'BEGIN dbms_stats.gather_table_stats(USER, ''EMP''); END;');
+  extended_description: |
+    Orkidea connects DuckDB to Oracle Database through the
+    [Orkidea ADBC driver](https://github.com/Tnsor-Labs/orkidea-adbc), a Rust
+    implementation of Oracle's network protocol that is linked into the
+    extension. There is no Oracle Instant Client, OCI, or ODBC to install, and
+    results stream into DuckDB as Arrow record batches with exact types
+    (`NUMBER(p,s)` as `DECIMAL`, `TIMESTAMP WITH TIME ZONE` as `TIMESTAMPTZ`,
+    LOBs, intervals, `JSON`, and `VECTOR`).
+
+    - **Secrets**: host/port/service, full connect strings, TNS aliases from
+      `tnsnames.ora`, wallets, and TLS.
+    - **ATTACH**: browse schemas and tables; filters, projections, `LIMIT`, and
+      top-N queries are pushed down to Oracle.
+    - **Parallel scans**: large tables are split into ROWID ranges read by
+      several sessions at one SCN, so the result is a consistent snapshot.
+    - **Writes**: `INSERT` (bulk array DML), `CREATE TABLE ... AS`, `UPDATE`,
+      `DELETE`, `RETURNING`, `ON CONFLICT`, `MERGE INTO`, and `ALTER TABLE`,
+      all inside DuckDB transactions.
+    - **Federation**: join Oracle tables with Postgres, Parquet, or any other
+      source DuckDB reads.
+    - `orkidea_query` and `orkidea_execute` run Oracle SQL and PL/SQL directly.
+
+    Not affiliated with, sponsored by, or endorsed by Oracle Corporation.
