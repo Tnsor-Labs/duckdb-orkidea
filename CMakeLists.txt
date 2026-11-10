@@ -67,6 +67,7 @@ set(EXTENSION_SOURCES
     src/orkidea_modify.cpp
     src/orkidea_optimizer.cpp
     src/orkidea_partition.cpp
+    src/orkidea_parameters.cpp
     src/orkidea_query.cpp
     src/orkidea_remote_query.cpp
     src/orkidea_scan.cpp

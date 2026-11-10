@@ -1,0 +1,111 @@
+# name: test/sql/execute_params.test
+# description: orkidea_execute binds its params to the statement's placeholders, by name or by position.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE orkidea_ep_t PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_ep_t (id NUMBER(9), name VARCHAR2(20), born DATE, amount NUMBER(10,2))');
+
+# --- DML, by name and by position ---
+
+query I
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_ep_t VALUES (:id, :name, :born, :amount)',
+                     params := {'name': 'a', 'id': 1, 'born': DATE '2026-01-02', 'amount': 1.25::DECIMAL(10,2)});
+----
+1
+
+query I
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_ep_t (id, name) VALUES (:1, :2)', params := row(2, 'b'));
+----
+1
+
+# A value is data, never SQL.
+query I
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_ep_t (id, name) VALUES (:id, :name)', params := {'id': 3, 'name': 'x'' OR ''1''=''1'});
+----
+1
+
+# In SQL each use of a placeholder is a bind; one field binds every use.
+query I
+FROM orkidea_execute('ora', 'UPDATE orkidea_ep_t SET name = name || :s WHERE id = :id OR id = :id + 1', params := {'s': '!', 'id': 1});
+----
+2
+
+# In PL/SQL a name binds once, however often it appears.
+query I
+FROM orkidea_execute('ora', 'BEGIN INSERT INTO orkidea_ep_t (id, name) VALUES (:id, :n || :n); END;', params := {'id': 4, 'n': 'y'});
+----
+1
+
+query ITTR
+SELECT id, name, born, amount FROM orkidea_query('ora', 'SELECT * FROM orkidea_ep_t ORDER BY id');
+----
+1	a!	2026-01-02 00:00:00	1.25
+2	b!	NULL	NULL
+3	x' OR '1'='1	NULL	NULL
+4	yy	NULL	NULL
+
+# --- Prepared statements bind new values on each execution ---
+
+statement ok
+PREPARE remove AS FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE id = :id', params := {'id': $1});
+
+# Binding alone, as in EXPLAIN, runs nothing.
+statement ok
+EXPLAIN FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE id = :id', params := {'id': 1});
+
+query I
+EXECUTE remove(1);
+----
+1
+
+query I
+EXECUTE remove(2);
+----
+1
+
+query I
+SELECT count(*) FROM orkidea_query('ora', 'SELECT 1 FROM orkidea_ep_t');
+----
+2
+
+# params := NULL, as when it is left out, binds nothing.
+query I
+FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE id = 3', params := NULL);
+----
+1
+
+# --- Errors ---
+
+statement error
+FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE id = :id', params := {'nope': 1});
+----
+no bound parameter is named "ID"
+
+statement error
+FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE id = :id', params := 1);
+----
+orkidea_execute: params must be a STRUCT
+
+statement error
+FROM orkidea_execute('ora', 'DELETE FROM orkidea_ep_t WHERE born = :t', params := {'t': TIMESTAMPTZ '2026-01-02 03:04:05+00'});
+----
+orkidea_execute: parameter t is a TIMESTAMP WITH TIME ZONE
+
+# Oracle takes no binds in DDL.
+statement error
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_ep_bad (x NUMBER DEFAULT :d)', params := {'d': 1});
+----
+bound parameter "d" matches no placeholder
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_ep_t PURGE');

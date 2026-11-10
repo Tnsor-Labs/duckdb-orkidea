@@ -222,10 +222,14 @@ unique_ptr<StatementStream> OpenQuery(ClientContext &context, shared_ptr<Connect
 	return stream;
 }
 
-int64_t ExecuteStatement(ClientContext &context, shared_ptr<Connection> connection, const string &sql) {
+int64_t ExecuteStatement(ClientContext &context, shared_ptr<Connection> connection, const string &sql,
+                         const Parameters &parameters) {
 	auto start = std::chrono::steady_clock::now();
 	Statement statement(std::move(connection));
 	statement.SetSqlQuery(sql);
+	if (!parameters.Empty()) {
+		parameters.Bind(context, statement);
+	}
 	auto rows_affected = statement.ExecuteUpdate();
 	DUCKDB_LOG(context, QueryLogType, sql, ElapsedMilliseconds(start));
 	return rows_affected;

@@ -291,9 +291,20 @@ Run DDL, DML, or PL/SQL. The result is the number of rows affected:
 FROM orkidea_execute('ora', 'UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10');
 ```
 
+`params` binds its placeholders as for `orkidea_query`. In PL/SQL a name binds
+once, however often it appears. Oracle takes no binds in DDL.
+
+```sql
+FROM orkidea_execute('ora', 'UPDATE emp SET sal = sal * :raise WHERE deptno = :dept',
+                     params := {'raise': 1.1, 'dept': 10});
+
+FROM orkidea_execute('ora', 'BEGIN raise_salary(:empno, :pct); END;', params := row(7839, 5));
+```
+
 Each call opens its own connection, which commits on success.
 `orkidea_execute` runs when the query executes, never when it is only bound,
-so `EXPLAIN` and prepared statements don't run it.
+so `EXPLAIN` and `PREPARE` don't run it; each `EXECUTE` of a prepared
+statement runs it with that execution's values.
 
 In place of a secret name, both functions take an
 `oracle://user:password@host:port/service` URI. Prefer secrets: their

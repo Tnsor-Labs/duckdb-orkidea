@@ -9,6 +9,7 @@
 #pragma once
 
 #include "orkidea_adbc.hpp"
+#include "orkidea_parameters.hpp"
 
 namespace duckdb {
 
@@ -46,9 +47,11 @@ void CopyArrowSchema(const ArrowSchema &source, ArrowSchema &target);
 //! Runs a query and returns its result stream. The SQL is logged as OrkideaQuery.
 unique_ptr<StatementStream> OpenQuery(ClientContext &context, shared_ptr<Connection> connection, const string &sql);
 
-//! Runs a statement without a result set and returns the affected row count,
-//! or -1 if unknown. The SQL is logged as OrkideaQuery.
-int64_t ExecuteStatement(ClientContext &context, shared_ptr<Connection> connection, const string &sql);
+//! Runs a statement without a result set, with `parameters` bound, and
+//! returns the affected row count, or -1 if unknown. The SQL is logged as
+//! OrkideaQuery.
+int64_t ExecuteStatement(ClientContext &context, shared_ptr<Connection> connection, const string &sql,
+                         const Parameters &parameters = Parameters());
 
 //! Reads every row of a result stream into `rows`, cast to the collection's
 //! types, which must be as many as the stream's columns.

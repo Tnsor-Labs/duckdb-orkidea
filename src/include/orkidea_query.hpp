@@ -12,6 +12,7 @@
 #pragma once
 
 #include "orkidea_adbc.hpp"
+#include "orkidea_parameters.hpp"
 
 #include "duckdb/function/table/arrow.hpp"
 
@@ -20,21 +21,6 @@ namespace duckdb {
 class ExtensionLoader;
 
 namespace orkidea {
-
-//! One row of values for a query's bind placeholders.
-struct QueryParameters {
-	//! The parameters of a STRUCT or row(...) value; none for NULL.
-	static QueryParameters FromValue(const Value &value);
-
-	bool Empty() const {
-		return values.empty();
-	}
-
-	//! Matched to placeholders by name, or else by position.
-	bool by_name = false;
-	vector<string> names;
-	vector<Value> values;
-};
 
 //! Throws unless the columns of `stream` have `types`, those DuckDB planned
 //! with. Oracle describes a query without its parameter values, so a bind
@@ -47,7 +33,7 @@ void CheckResultTypes(ClientContext &context, StatementStream &stream, const vec
 class QueryScanFactory : public ArrowScanFactory {
 public:
 	QueryScanFactory(ClientContext &context, shared_ptr<Connection> connection, string sql,
-	                 QueryParameters parameters = QueryParameters());
+	                 Parameters parameters = Parameters());
 
 	//! Describes the query. Oracle needs no parameter values for that.
 	void GetSchema(ArrowSchema &schema) override;
@@ -56,12 +42,11 @@ public:
 
 private:
 	unique_ptr<Statement> NewStatement() const;
-	void BindParameters(Statement &statement) const;
 
 	ClientContext &context;
 	shared_ptr<Connection> connection;
 	string sql;
-	QueryParameters parameters;
+	Parameters parameters;
 	//! The column types GetSchema described.
 	vector<LogicalType> types;
 };

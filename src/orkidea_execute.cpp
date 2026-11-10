@@ -14,11 +14,13 @@ namespace orkidea {
 namespace {
 
 struct ExecuteBindData : public TableFunctionData {
-	ExecuteBindData(AdbcOptions options_p, string sql_p) : options(std::move(options_p)), sql(std::move(sql_p)) {
+	ExecuteBindData(AdbcOptions options_p, string sql_p, Parameters parameters_p)
+	    : options(std::move(options_p)), sql(std::move(sql_p)), parameters(std::move(parameters_p)) {
 	}
 
 	AdbcOptions options;
 	string sql;
+	Parameters parameters;
 };
 
 struct ExecuteState : public GlobalTableFunctionState {
@@ -36,9 +38,14 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
                               vector<Identifier> &names) {
 	auto target = StringArgument(input.inputs[0], "connection target");
 	auto sql = StringArgument(input.inputs[1], "statement");
+	Parameters parameters;
+	auto params = input.named_parameters.find("params");
+	if (params != input.named_parameters.end()) {
+		parameters = Parameters::FromValue(params->second, "orkidea_execute");
+	}
 	names.emplace_back("rows_affected");
 	return_types.emplace_back(LogicalType::BIGINT);
-	return make_uniq<ExecuteBindData>(Secrets::ResolveTarget(context, target), std::move(sql));
+	return make_uniq<ExecuteBindData>(Secrets::ResolveTarget(context, target), std::move(sql), std::move(parameters));
 }
 
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &, TableFunctionInitInput &) {
@@ -55,7 +62,7 @@ void Execute(ClientContext &context, TableFunctionInput &input, DataChunk &outpu
 	state.done = true;
 	auto &bind_data = input.bind_data->Cast<ExecuteBindData>();
 	auto connection = make_shared_ptr<Connection>(make_shared_ptr<Database>(bind_data.options));
-	auto rows_affected = ExecuteStatement(context, std::move(connection), bind_data.sql);
+	auto rows_affected = ExecuteStatement(context, std::move(connection), bind_data.sql, bind_data.parameters);
 	output.data[0].Append(rows_affected < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(rows_affected));
 	output.CheckCardinality(1);
 }
@@ -64,6 +71,8 @@ void Execute(ClientContext &context, TableFunctionInput &input, DataChunk &outpu
 
 void ExecuteFunction::Register(ExtensionLoader &loader) {
 	TableFunction function("orkidea_execute", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+	// NULL by default: no parameters.
+	function.GetSignature().AddKeywordOnly(Identifier("params"), LogicalType::ANY, Value());
 	loader.RegisterFunction(function);
 }
 
