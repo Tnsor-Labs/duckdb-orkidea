@@ -31,19 +31,25 @@ docker run -d --name "$container" -p "127.0.0.1:$port:1521" \
     -e APP_USER="$user" -e APP_USER_PASSWORD="$password" \
     "$image" >/dev/null
 
+# grep reads the whole log (no -q): with pipefail, grep -q exiting at the
+# first match can make `docker logs` fail on a closed pipe, and the check fail.
+ready() {
+    docker logs "$container" 2>&1 | grep -F "DATABASE IS READY TO USE" >/dev/null
+}
+
 echo "Waiting for the database to open (a minute or two on first start) ..."
 for _ in $(seq 1 180); do
-    if docker logs "$container" 2>&1 | grep -q "DATABASE IS READY TO USE"; then
+    if ready; then
         break
     fi
-    if ! docker container inspect -f '{{.State.Running}}' "$container" | grep -q true; then
-        docker logs "$container" | tail -20 >&2
+    if [[ "$(docker container inspect -f '{{.State.Running}}' "$container")" != true ]]; then
+        docker logs "$container" 2>&1 | tail -20 >&2
         echo "The container stopped; see its log above." >&2
         exit 1
     fi
     sleep 2
 done
-docker logs "$container" 2>&1 | grep -q "DATABASE IS READY TO USE" || {
+ready || {
     echo "The database did not open in 6 minutes." >&2
     exit 1
 }
