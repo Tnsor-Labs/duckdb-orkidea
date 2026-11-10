@@ -32,8 +32,8 @@ DUCKDB_QUERIES = {
     "scan_narrow": ("Copy 2 of ORDERS' 7 columns",
                     "CREATE OR REPLACE TEMP TABLE t AS SELECT order_id, amount FROM db.orders"),
     "filter_range": ("Orders of one month (8%)",
-                     "CREATE OR REPLACE TEMP TABLE t AS FROM db.orders "
-                     "WHERE ordered_at >= TIMESTAMP '2025-03-01' AND ordered_at < TIMESTAMP '2025-04-01'"),
+                     ("CREATE OR REPLACE TEMP TABLE t AS FROM db.orders "
+                      "WHERE ordered_at >= TIMESTAMP '2025-03-01' AND ordered_at < TIMESTAMP '2025-04-01'")),
     "filter_point": ("Orders of one customer (50 rows)",
                      "CREATE OR REPLACE TEMP TABLE t AS FROM db.orders WHERE customer_id = 4242"),
     "group_by": ("GROUP BY status: count, sum, avg",
@@ -43,9 +43,9 @@ DUCKDB_QUERIES = {
     "top_n": ("Top 10 by amount",
               "SELECT order_id, amount FROM db.orders ORDER BY amount DESC, order_id LIMIT 10"),
     "join": ("ORDERS x CUSTOMERS x REGIONS, by region",
-             "SELECT r.name, count(*), sum(o.amount) FROM db.orders o "
-             "JOIN db.customers c ON c.customer_id = o.customer_id "
-             "JOIN db.regions r ON r.region_id = c.region_id GROUP BY r.name ORDER BY r.name"),
+             ("SELECT r.name, count(*), sum(o.amount) FROM db.orders o "
+              "JOIN db.customers c ON c.customer_id = o.customer_id "
+              "JOIN db.regions r ON r.region_id = c.region_id GROUP BY r.name ORDER BY r.name")),
 }
 POINT_LOOKUPS = 200
 POINT_SQL = "SELECT ename, sal FROM db.emp WHERE empno = 7839"
@@ -59,8 +59,7 @@ PYTHON_QUERIES = {
 def lab_env():
     env = {}
     for line in LAB_ENV.read_text().splitlines():
-        if line.startswith("export "):
-            line = line[len("export "):]
+        line = line.removeprefix("export ")
         if "=" in line and not line.startswith("#"):
             key, value = line.split("=", 1)
             env[key] = value.strip("'\"")
@@ -119,7 +118,7 @@ def duckdb_engine(engine, env, runs):
     results = {}
     for name, (_, sql) in DUCKDB_QUERIES.items():
         try:
-            times = timed(lambda: con.execute(sql).fetchall(), runs)
+            times = timed(lambda sql=sql: con.execute(sql).fetchall(), runs)
         except duckdb.Error as error:
             # A query the engine cannot run is a result too.
             results[name] = {"error": str(error).splitlines()[0]}
@@ -164,7 +163,7 @@ def python_engine(engine, env, runs):
 
     results = {}
     for name, (_, sql) in PYTHON_QUERIES.items():
-        times = timed(lambda: fetch(sql), runs)
+        times = timed(lambda sql=sql: fetch(sql), runs)
         table = fetch(sql)
         results[name] = {
             "times": times,
@@ -206,7 +205,7 @@ def main():
         print(f"running {engine}", file=sys.stderr, flush=True)
         out = subprocess.run(
             [sys.executable, __file__, "--engine", engine, "--runs", str(args.runs)],
-            env=child, capture_output=True, text=True,
+            env=child, capture_output=True, text=True, check=False,
         )
         if out.returncode:
             sys.exit(f"{engine} failed:\n{out.stderr.replace(env['ORKIDEA_LAB_PASSWORD'], '***')}")
