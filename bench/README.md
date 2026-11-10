@@ -69,29 +69,31 @@ into integers and decimals from its bytes. Driver 0.2.1 took 3.36 s and
 `bench/mixed.sql` creates `BENCH_MIXED`: 300,000 rows with `JSON`, a
 16-dimension `FLOAT32` `VECTOR`, an interval, and an `NCLOB` beside numbers,
 text, and a timestamp. Driver 0.3.0 read a query with any of those four types
-row by row; the driver's `main` (3f80fcb) decodes every type into Arrow
-columns. `bench/mixed.py` reads it through one session; medians of five runs:
+row by row; the driver's `main` decodes every type into Arrow columns, and
+writes `JSON` as text as it decodes Oracle's binary form (OSON), without
+building a value first. `bench/mixed.py` reads it through one session. Each
+figure is the mean of two medians of five runs, the two drivers run in
+turns on a busy machine (load average 6 to 7):
 
 | Query (300k rows) | Orkidea 0.3.0 | Orkidea `main` | python-oracledb, `arraysize=10000` |
 | --- | ---: | ---: | ---: |
-| All columns and the `ROWID` | 5.54 s | 5.61 s | fails |
-| `id`, `JSON` | 2.70 s | **2.19 s** | fails |
-| `id`, `VECTOR` | 1.12 s | **1.01 s** | 1.41 s |
-| `id`, interval | 0.40 s | **0.19 s** | 0.27 s |
-| `id`, `NCLOB` | 1.20 s | **1.19 s** | 1.53 s |
-| Numbers, text, and a timestamp | **0.27 s** | **0.27 s** | 0.52 s |
+| All columns and the `ROWID` | 5.69 s | **3.98 s** | fails |
+| `id`, `JSON` | 2.88 s | **1.57 s** | fails |
+| `id`, `VECTOR` | 1.21 s | **1.04 s** | 1.69 s |
+| `id`, interval | 0.35 s | **0.19 s** | 0.31 s |
+| `id`, `NCLOB` | 1.21 s | **1.07 s** | 1.69 s |
+| Numbers, text, and a timestamp | **0.30 s** | **0.30 s** | 0.64 s |
 
 python-oracledb's `fetch_df_all` refuses `JSON` ("NotSupportedError").
 
-Decoding them column by column helps intervals, but little else: for these
-types, the time goes elsewhere.
-
-- **`JSON`** takes 1.34 s of the client's CPU, for decoding Oracle's binary
-  JSON (OSON) into values and writing them as text. Selected as text with
-  `JSON_SERIALIZE(doc)`, the same rows take 1.15 s, and 0.12 s of CPU.
-- **`VECTOR` and `NCLOB`** values arrive as LOBs and take 0.3 s of the
-  client's CPU; the rest is the database's. Cast to `NVARCHAR2`, the `NCLOB`
-  column takes 0.55 s.
+- **`JSON`** reads in half the time. Its decoding takes 0.7 s of the
+  client's CPU, against 1.3 s; selected as text with `JSON_SERIALIZE(doc)`,
+  the same rows take 0.13 s of CPU, so writing text from OSON still costs
+  something, mostly putting each object's members in name order.
+- **Intervals** read in half the time.
+- **`VECTOR` and `NCLOB`** values arrive as LOBs, and most of their time is
+  the database's: they take 0.3 s of the client's CPU. Cast to `NVARCHAR2`,
+  the `NCLOB` column takes 0.55 s.
 
 ## Over a network
 
