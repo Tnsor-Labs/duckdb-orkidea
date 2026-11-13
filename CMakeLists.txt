@@ -30,10 +30,22 @@ elseif("${OS_NAME}" STREQUAL "osx")
     set(Rust_CARGO_TARGET "x86_64-apple-darwin")
   endif()
 elseif(WIN32)
-  if("${OS_ARCH}" STREQUAL "arm64")
+  if("${OS_ARCH}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR}" MATCHES
+                                       "^(ARM64|arm64|aarch64)$")
     set(Rust_CARGO_TARGET "aarch64-pc-windows-msvc")
   else()
     set(Rust_CARGO_TARGET "x86_64-pc-windows-msvc")
+  endif()
+endif()
+
+# A toolchain installed for the host has only the host's standard library, so
+# a cross build needs its target added first.
+find_program(RUSTUP rustup)
+if(Rust_CARGO_TARGET AND RUSTUP)
+  execute_process(COMMAND ${RUSTUP} target add ${Rust_CARGO_TARGET}
+                  RESULT_VARIABLE RUSTUP_RESULT)
+  if(NOT RUSTUP_RESULT EQUAL 0)
+    message(WARNING "rustup could not add the ${Rust_CARGO_TARGET} target")
   endif()
 endif()
 
