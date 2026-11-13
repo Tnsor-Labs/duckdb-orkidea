@@ -3,6 +3,7 @@
 #include "orkidea_scan.hpp"
 #include "orkidea_util.hpp"
 #include "storage/orkidea_catalog.hpp"
+#include "storage/orkidea_schema_entry.hpp"
 #include "storage/orkidea_transaction.hpp"
 
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
@@ -59,16 +60,20 @@ const vector<IndexInfo> &OrkideaTableEntry::GetUniqueKeys(ClientContext &context
 	if (keys_loaded) {
 		return unique_keys;
 	}
-	auto sql = "SELECT c.constraint_name, c.constraint_type, cc.column_name"
-	           " FROM all_constraints c JOIN all_cons_columns cc"
-	           "   ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name"
-	           " WHERE c.owner = " +
-	           QuoteLiteral(table->schema) + " AND c.table_name = " + QuoteLiteral(table->name) +
-	           "   AND c.constraint_type IN ('P', 'U') AND c.status = 'ENABLED'"
-	           " ORDER BY c.constraint_name, cc.position";
-	auto connection = OrkideaTransaction::Get(context, catalog).GetConnection();
+	vector<vector<Value>> rows;
+	if (!ParentSchema().Cast<OrkideaSchemaEntry>().ListedKeys(context, table->name, rows)) {
+		auto sql =
+		    "SELECT c.constraint_name, c.constraint_type, cc.column_name"
+		    " FROM all_constraints c JOIN all_cons_columns cc"
+		    "   ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name"
+		    " WHERE c.owner = " +
+		    QuoteLiteral(table->schema) + " AND c.table_name = " + QuoteLiteral(table->name) +
+		    "   AND c.constraint_type IN ('P', 'U') AND c.status = 'ENABLED'"
+		    " ORDER BY c.constraint_name, cc.position";
+		rows = QueryRows(context, OrkideaTransaction::Get(context, catalog).GetConnection(), sql);
+	}
 	map<string, IndexInfo> keys;
-	for (auto &row : QueryRows(context, connection, sql)) {
+	for (auto &row : rows) {
 		auto &key = keys[row[0].ToString()];
 		key.is_unique = true;
 		key.is_primary = row[1].ToString() == "P";

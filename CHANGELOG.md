@@ -10,6 +10,67 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+### Behaviour changes to read before upgrading
+
+- **`TIMESTAMP WITH LOCAL TIME ZONE` columns read as `TIMESTAMPTZ`** --
+  @hc12r. They were `TIMESTAMP`, the wall-clock time in the database time
+  zone; they are now the instant, as `TIMESTAMP WITH TIME ZONE` columns
+  are. Where `DBTIMEZONE` is `+00:00` only the type changes. This follows
+  the Orkidea driver 0.4.
+- **`RETURNING` gives `DATE` and `TIMESTAMP` values as stored** -- @hc12r.
+  They were shifted by the client's offset from UTC (with the client at
+  `+02:00`, `DATE '2000-01-01'` came back as `1999-12-31 22:00:00`), and
+  `TIMESTAMP` values lost their fractional seconds. Clients in UTC saw only
+  the fractions go. Fixed in the driver.
+
+### Catalog
+
+- **Listing an attached database no longer holds up other queries** --
+  @hc12r. `duckdb_tables()`, `duckdb_columns()`, and `information_schema`,
+  which the DuckDB UI runs over every attached database when it shows its
+  sidebar, described each table in turn, with a lock held that made any
+  statement on the same schema wait until the whole listing was done. The
+  lock is no longer held while Oracle is queried.
+- **Listings describe tables 50 to a query** -- @hc12r. One query, which
+  returns no rows, describes up to 50 tables, where each took a round trip
+  of its own, and the primary and unique keys `duckdb_tables()` reports are
+  read with one query per schema instead of one per table. A table that
+  cannot be described, such as an invalid view, is found by describing the
+  batch in halves, and left out as before. With 456 tables, on the lab's
+  machine, `duckdb_columns()` takes 13 s instead of 36 s, and 7 s instead of
+  about two minutes with 20 ms between DuckDB and Oracle; `duckdb_tables()`
+  takes 16 s where it took several minutes.
+
+### Queries
+
+- **Filters on `TIMESTAMP WITH LOCAL TIME ZONE` run in Oracle** -- @hc12r.
+  Now that the column reads as an instant, comparisons with a
+  `TIMESTAMPTZ` are sent, as for `TIMESTAMP WITH TIME ZONE`, and so are
+  `ORDER BY ... LIMIT` on it.
+
+### Platforms
+
+- **macOS x86_64 and Windows ARM64** -- @hc12r. Both build in the
+  distribution pipeline: macOS x86_64 cross-compiled on arm64 runners, and
+  Windows ARM64 with the driver's C code (aws-lc) compiled by clang-cl.
+
+### Driver
+
+- **Built on the Orkidea ADBC driver 0.4.1** -- @hc12r. Arrow 60,
+  `oracledb` 26.0.0-beta.6, every column type decoded straight into Arrow
+  columns (intervals, `ROWID`, `JSON`, `VECTOR`, and `NCLOB` included), and
+  `JSON` written as text as it is decoded, in about half the time. See the
+  release notes of
+  [0.4.1](https://github.com/Tnsor-Labs/orkidea-adbc/releases/tag/v0.4.1) and
+  [0.4.0](https://github.com/Tnsor-Labs/orkidea-adbc/releases/tag/v0.4.0).
+
+### Testing
+
+- **Listings are tested against describing each table** -- @hc12r.
+  `test/sql/attach_listing.test` compares the columns a listing reports with
+  those of tables described one by one, with an invalid view, columns whose
+  names differ only in case, and a table created after the listing.
+
 ## [0.2.0] - 2026-11-11
 
 Orkidea 0.2.0 runs aggregates in Oracle, binds parameters in

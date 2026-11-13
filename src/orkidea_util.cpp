@@ -177,15 +177,21 @@ void ReleaseCopy(ArrowSchema *schema) {
 } // namespace
 
 void CopyArrowSchema(const ArrowSchema &source, ArrowSchema &target) {
+	CopyArrowSchemaColumns(source, 0, NumericCast<idx_t>(source.n_children), target);
+}
+
+void CopyArrowSchemaColumns(const ArrowSchema &source, idx_t offset, idx_t count, ArrowSchema &target) {
+	if (offset + count > NumericCast<idx_t>(source.n_children)) {
+		throw InternalException("Arrow schema has %d children, not %d", source.n_children, offset + count);
+	}
 	auto copy = make_uniq<SchemaCopy>();
 	copy->format = source.format ? source.format : "";
 	copy->name = source.name ? source.name : "";
 	copy->metadata.assign(source.metadata ? source.metadata : "", MetadataLength(source.metadata));
 
-	auto child_count = NumericCast<idx_t>(source.n_children);
-	copy->children = unique_ptr<ArrowSchema[]>(new ArrowSchema[child_count]);
-	for (idx_t i = 0; i < child_count; i++) {
-		CopyArrowSchema(*source.children[i], copy->children[i]);
+	copy->children = unique_ptr<ArrowSchema[]>(new ArrowSchema[count]);
+	for (idx_t i = 0; i < count; i++) {
+		CopyArrowSchema(*source.children[offset + i], copy->children[i]);
 		copy->child_pointers.push_back(&copy->children[i]);
 	}
 	if (source.dictionary) {
@@ -197,7 +203,7 @@ void CopyArrowSchema(const ArrowSchema &source, ArrowSchema &target) {
 	target.name = source.name ? copy->name.c_str() : nullptr;
 	target.metadata = source.metadata ? copy->metadata.data() : nullptr;
 	target.flags = source.flags;
-	target.n_children = source.n_children;
+	target.n_children = NumericCast<int64_t>(count);
 	target.children = copy->child_pointers.empty() ? nullptr : copy->child_pointers.data();
 	target.dictionary = copy->dictionary.get();
 	target.release = ReleaseCopy;

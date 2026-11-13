@@ -1,0 +1,96 @@
+# name: test/sql/attach_listing.test
+# description: Listing an attached Oracle schema (duckdb_tables, duckdb_columns) describes its tables several to a query, as describing each one would.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT object_name, object_type FROM user_objects WHERE object_name LIKE ''ORKIDEA\_CL\_%'' ESCAPE ''\'' OR object_name LIKE ''orkidea\_cl\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP '' || t.object_type || '' "'' || t.object_name || ''"'' || CASE t.object_type WHEN ''TABLE'' THEN '' PURGE'' END; END LOOP; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cl_a (id NUMBER(5), name VARCHAR2(10), amount NUMBER(12,2), flag BOOLEAN)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cl_b (d DATE, ts TIMESTAMP(3), tz TIMESTAMP WITH TIME ZONE, ltz TIMESTAMP WITH LOCAL TIME ZONE, r RAW(4))');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE "orkidea_cl_lower" ("Mixed" NUMBER(9), "mixed" VARCHAR2(5))');
+
+# A view left invalid by dropping its table cannot be described: it fails its
+# batch, which is then described in halves, and the listing leaves it out.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cl_gone (x NUMBER)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE VIEW orkidea_cl_bad AS SELECT x FROM orkidea_cl_gone');
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_cl_gone PURGE');
+
+# One attach lists the schema; the other describes each table on its own.
+statement ok
+ATTACH 'ora' AS listed (TYPE orkidea);
+
+statement ok
+ATTACH 'ora' AS single (TYPE orkidea);
+
+statement ok
+FROM single.orkidea_cl_a LIMIT 0;
+
+statement ok
+FROM single.orkidea_cl_b LIMIT 0;
+
+statement ok
+FROM single."orkidea_cl_lower" LIMIT 0;
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'listed' AND lower(table_name) LIKE 'orkidea\_cl\_%' ESCAPE '\' ORDER BY table_name;
+----
+ORKIDEA_CL_A
+ORKIDEA_CL_B
+orkidea_cl_lower
+
+# Every column of the listed tables, with the type a table described alone
+# has.
+query IIIII
+SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'listed' AND lower(table_name) LIKE 'orkidea\_cl\_%' ESCAPE '\'
+EXCEPT
+SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'single' AND lower(table_name) LIKE 'orkidea\_cl\_%' ESCAPE '\';
+----
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'listed' AND lower(table_name) LIKE 'orkidea\_cl\_%' ESCAPE '\';
+----
+11
+
+query III
+SELECT table_name, column_name, data_type FROM duckdb_columns() WHERE database_name = 'listed' AND table_name = 'orkidea_cl_lower' ORDER BY column_index;
+----
+orkidea_cl_lower	Mixed	INTEGER
+orkidea_cl_lower	mixed:1	VARCHAR
+
+# TIMESTAMP WITH LOCAL TIME ZONE reads as an instant.
+query T
+SELECT data_type FROM duckdb_columns() WHERE database_name = 'listed' AND table_name = 'ORKIDEA_CL_B' AND column_name = 'LTZ';
+----
+TIMESTAMP WITH TIME ZONE
+
+# A table created after the listing is still found.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cl_late (v VARCHAR2(3))');
+
+statement ok
+INSERT INTO listed.orkidea_cl_late VALUES ('x');
+
+query T
+FROM listed.orkidea_cl_late;
+----
+x
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT object_name, object_type FROM user_objects WHERE object_name LIKE ''ORKIDEA\_CL\_%'' ESCAPE ''\'' OR object_name LIKE ''orkidea\_cl\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP '' || t.object_type || '' "'' || t.object_name || ''"'' || CASE t.object_type WHEN ''TABLE'' THEN '' PURGE'' END; END LOOP; END;');

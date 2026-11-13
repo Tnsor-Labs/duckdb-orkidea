@@ -102,22 +102,32 @@ OrkideaSchemaEntry &OrkideaCatalog::AddSchema(const string &oracle_name) {
 }
 
 void OrkideaCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
-	vector<reference<OrkideaSchemaEntry>> entries;
+	bool listed;
 	{
 		lock_guard<mutex> guard(schemas_lock);
+		listed = all_schemas_listed;
+	}
+	if (!listed) {
+		// Oracle's own schemas (SYS, XDB, ...) are left out of listings, but
+		// can still be named. Queried without the lock, so that lookups of
+		// schemas already known do not wait for Oracle.
+		string sql = "SELECT username FROM all_users WHERE ";
+		sql += schema_filter.empty() ? "oracle_maintained = 'N' OR username = " + QuoteLiteral(info.current_schema)
+		                             : "username = " + QuoteLiteral(schema_filter);
+		auto connection = OrkideaTransaction::Get(context, *this).GetConnection();
+		auto rows = QueryRows(context, connection, sql);
+		lock_guard<mutex> guard(schemas_lock);
 		if (!all_schemas_listed) {
-			// Oracle's own schemas (SYS, XDB, ...) are left out of listings, but
-			// can still be named.
-			string sql = "SELECT username FROM all_users WHERE ";
-			sql += schema_filter.empty() ? "oracle_maintained = 'N' OR username = " + QuoteLiteral(info.current_schema)
-			                             : "username = " + QuoteLiteral(schema_filter);
-			auto connection = OrkideaTransaction::Get(context, *this).GetConnection();
-			for (auto &row : QueryRows(context, connection, sql)) {
+			for (auto &row : rows) {
 				listed_schemas.push_back(row[0].ToString());
 				AddSchema(listed_schemas.back());
 			}
 			all_schemas_listed = true;
 		}
+	}
+	vector<reference<OrkideaSchemaEntry>> entries;
+	{
+		lock_guard<mutex> guard(schemas_lock);
 		// Schemas found only by name, such as SYS, stay out of listings.
 		for (auto &schema : listed_schemas) {
 			entries.push_back(*schemas.at(schema));

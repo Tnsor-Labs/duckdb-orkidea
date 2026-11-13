@@ -5,6 +5,7 @@
 #include "storage/orkidea_table_entry.hpp"
 #include "storage/orkidea_transaction.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "orkidea_insert.hpp"
@@ -82,11 +83,18 @@ OrkideaCatalog &OrkideaSchemaEntry::GetOrkideaCatalog() {
 }
 
 void OrkideaSchemaEntry::ListTables(ClientContext &context) {
-	if (tables_listed) {
-		return;
+	{
+		lock_guard<mutex> guard(lock);
+		if (tables_listed) {
+			return;
+		}
 	}
+	// Queried without the lock, so that lookups of tables already described
+	// do not wait for Oracle.
 	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
-	for (auto &row : QueryRows(context, connection, TablesQuery(name.GetIdentifierName()))) {
+	auto rows = QueryRows(context, connection, TablesQuery(name.GetIdentifierName()));
+	lock_guard<mutex> guard(lock);
+	for (auto &row : rows) {
 		table_names[row[0].ToString()] = TableListing::FromRow(row);
 	}
 	tables_listed = true;
@@ -95,8 +103,10 @@ void OrkideaSchemaEntry::ListTables(ClientContext &context) {
 vector<string> OrkideaSchemaEntry::QueryTableNames(ClientContext &context, const string &condition) {
 	auto sql = TablesQuery(name.GetIdentifierName()) + " AND " + condition;
 	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
+	auto rows = QueryRows(context, connection, sql);
 	vector<string> found;
-	for (auto &row : QueryRows(context, connection, sql)) {
+	lock_guard<mutex> guard(lock);
+	for (auto &row : rows) {
 		table_names[row[0].ToString()] = TableListing::FromRow(row);
 		found.push_back(row[0].ToString());
 	}
@@ -105,8 +115,11 @@ vector<string> OrkideaSchemaEntry::QueryTableNames(ClientContext &context, const
 
 optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::FindTable(ClientContext &context, const string &table_name) {
 	vector<string> known;
-	for (auto &entry : table_names) {
-		known.push_back(entry.first);
+	{
+		lock_guard<mutex> guard(lock);
+		for (auto &entry : table_names) {
+			known.push_back(entry.first);
+		}
 	}
 	auto match = MatchName(table_name, known);
 	if (match.empty()) {
@@ -126,24 +139,28 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::FindTable(ClientContext &con
 }
 
 optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::DescribeTable(ClientContext &context, const string &oracle_name) {
-	auto cached = tables.find(oracle_name);
-	if (cached != tables.end()) {
-		return cached->second.get();
+	{
+		lock_guard<mutex> guard(lock);
+		auto cached = tables.find(oracle_name);
+		if (cached != tables.end()) {
+			return cached->second.get();
+		}
 	}
+	ArrowSchemaWrapper described;
+	Statement statement(OrkideaTransaction::Get(context, ParentCatalog()).GetConnection());
+	statement.SetSqlQuery("SELECT * FROM " + QuoteIdentifier(name.GetIdentifierName()) + "." +
+	                      QuoteIdentifier(oracle_name));
+	statement.ExecuteSchema(described.arrow_schema);
+	return AddTable(context, oracle_name, described.arrow_schema, 0,
+	                NumericCast<idx_t>(described.arrow_schema.n_children));
+}
+
+optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &context, const string &oracle_name,
+                                                             const ArrowSchema &described, idx_t offset, idx_t count) {
 	auto table = make_shared_ptr<OracleTable>();
 	table->schema = name.GetIdentifierName();
 	table->name = oracle_name;
-	auto known = table_names.find(oracle_name);
-	if (known != table_names.end()) {
-		table->estimated_rows = known->second.estimated_rows;
-		table->splittable = known->second.splittable;
-		table->has_rowid = known->second.has_rowid;
-	}
-
-	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
-	Statement statement(connection);
-	statement.SetSqlQuery("SELECT * FROM " + table->QualifiedName());
-	statement.ExecuteSchema(table->arrow_schema.arrow_schema);
+	CopyArrowSchemaColumns(described, offset, count, table->arrow_schema.arrow_schema);
 
 	ArrowTableSchema arrow_table;
 	ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table, table->arrow_schema.arrow_schema);
@@ -169,10 +186,160 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::DescribeTable(ClientContext 
 		create_info.columns.AddColumn(std::move(column));
 	}
 
+	lock_guard<mutex> guard(lock);
+	// Another statement may have described it meanwhile: the first entry is
+	// kept, since statements may already use it.
+	auto cached = tables.find(oracle_name);
+	if (cached != tables.end()) {
+		return cached->second.get();
+	}
+	auto known = table_names.find(oracle_name);
+	if (known != table_names.end()) {
+		table->estimated_rows = known->second.estimated_rows;
+		table->splittable = known->second.splittable;
+		table->has_rowid = known->second.has_rowid;
+	}
 	auto entry = make_uniq<OrkideaTableEntry>(ParentCatalog(), *this, create_info, std::move(table));
 	auto &result = *entry;
 	tables.emplace(oracle_name, std::move(entry));
 	return &result;
+}
+
+namespace {
+
+//! Tables described by one query, at most: enough to save most round trips,
+//! few enough to keep the query cheap to parse.
+constexpr idx_t MAX_BATCH_TABLES = 50;
+
+//! The column put between two tables' columns in a batch, to tell them apart.
+string BatchMarker(idx_t index) {
+	return "orkidea$" + to_string(index);
+}
+
+} // namespace
+
+void OrkideaSchemaEntry::DescribeEach(ClientContext &context, const vector<string> &oracle_names) {
+	for (auto &oracle_name : oracle_names) {
+		try {
+			DescribeTable(context, oracle_name);
+		} catch (std::exception &) {
+			// An invalid view, or one the user may not read, cannot be
+			// described or queried, so listings leave it out.
+		}
+	}
+}
+
+void OrkideaSchemaEntry::DescribeTables(ClientContext &context, const vector<string> &oracle_names) {
+	for (idx_t start = 0; start < oracle_names.size(); start += MAX_BATCH_TABLES) {
+		auto end = MinValue<idx_t>(start + MAX_BATCH_TABLES, oracle_names.size());
+		DescribeBatch(context, vector<string>(oracle_names.begin() + NumericCast<int64_t>(start),
+		                                      oracle_names.begin() + NumericCast<int64_t>(end)));
+	}
+}
+
+void OrkideaSchemaEntry::DescribeBatch(ClientContext &context, const vector<string> &oracle_names) {
+	if (oracle_names.size() < 2) {
+		DescribeEach(context, oracle_names);
+		return;
+	}
+	// One parse, and one round trip, for every table of the batch: a query
+	// over all of them that returns no rows, with a marker column between
+	// the columns of one table and the next. The hint spares Oracle from
+	// choosing a join order.
+	string select_list;
+	string from;
+	for (idx_t i = 0; i < oracle_names.size(); i++) {
+		auto alias = "t" + to_string(i);
+		if (i > 0) {
+			select_list += ", CAST(NULL AS NUMBER(1)) AS " + QuoteIdentifier(BatchMarker(i)) + ", ";
+			from += " CROSS JOIN ";
+		}
+		select_list += alias + ".*";
+		from += QuoteIdentifier(name.GetIdentifierName()) + "." + QuoteIdentifier(oracle_names[i]) + " " + alias;
+	}
+	auto sql = "SELECT /*+ ORDERED */ " + select_list + " FROM " + from + " WHERE 1 = 0";
+
+	// Each table's columns, as offsets into the described schema.
+	ArrowSchemaWrapper described;
+	vector<pair<idx_t, idx_t>> ranges;
+	try {
+		Statement statement(OrkideaTransaction::Get(context, ParentCatalog()).GetConnection());
+		statement.SetSqlQuery(sql);
+		statement.ExecuteSchema(described.arrow_schema);
+		auto &schema = described.arrow_schema;
+		idx_t start = 0;
+		for (idx_t i = 0; i < NumericCast<idx_t>(schema.n_children); i++) {
+			auto column = schema.children[i]->name;
+			if (column && BatchMarker(ranges.size() + 1) == column) {
+				ranges.emplace_back(start, i - start);
+				start = i + 1;
+			}
+		}
+		ranges.emplace_back(start, NumericCast<idx_t>(schema.n_children) - start);
+	} catch (std::exception &) {
+		// A table that cannot be described, or more columns than a query may
+		// have, fails the batch: each half is tried on its own.
+		ranges.clear();
+	}
+	if (ranges.size() != oracle_names.size()) {
+		auto half = oracle_names.size() / 2;
+		DescribeBatch(context, vector<string>(oracle_names.begin(), oracle_names.begin() + NumericCast<int64_t>(half)));
+		DescribeBatch(context, vector<string>(oracle_names.begin() + NumericCast<int64_t>(half), oracle_names.end()));
+		return;
+	}
+	for (idx_t i = 0; i < oracle_names.size(); i++) {
+		try {
+			AddTable(context, oracle_names[i], described.arrow_schema, ranges[i].first, ranges[i].second);
+		} catch (std::exception &) {
+			// A type DuckDB cannot read: left out of listings, as when the
+			// table is described alone.
+		}
+	}
+}
+
+bool OrkideaSchemaEntry::ListedKeys(ClientContext &context, const string &oracle_name, vector<vector<Value>> &rows) {
+	auto covered = [&]() {
+		if (!keys_cover.count(oracle_name)) {
+			return false;
+		}
+		auto found = listed_keys.find(oracle_name);
+		if (found != listed_keys.end()) {
+			rows = found->second;
+		}
+		return true;
+	};
+	{
+		lock_guard<mutex> guard(lock);
+		if (!tables_listed) {
+			return false;
+		}
+		if (keys_listed) {
+			return covered();
+		}
+	}
+	// A listing reports every table's keys (duckdb_tables), so they are read
+	// for all the schema's tables at once, without the lock.
+	auto connection = OrkideaTransaction::Get(context, ParentCatalog()).GetConnection();
+	auto result = QueryRows(context, connection,
+	                        "SELECT c.table_name, c.constraint_name, c.constraint_type, cc.column_name"
+	                        " FROM all_constraints c JOIN all_cons_columns cc"
+	                        "   ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name"
+	                        "  AND cc.table_name = c.table_name"
+	                        " WHERE c.owner = " +
+	                            QuoteLiteral(name.GetIdentifierName()) +
+	                            " AND c.constraint_type IN ('P', 'U') AND c.status = 'ENABLED'"
+	                            " ORDER BY c.table_name, c.constraint_name, cc.position");
+	lock_guard<mutex> guard(lock);
+	if (!keys_listed) {
+		for (auto &table : table_names) {
+			keys_cover.insert(table.first);
+		}
+		for (auto &row : result) {
+			listed_keys[row[0].ToString()].push_back({row[1], row[2], row[3]});
+		}
+		keys_listed = true;
+	}
+	return covered();
 }
 
 optional_ptr<CatalogEntry> OrkideaSchemaEntry::LookupEntry(CatalogTransaction transaction,
@@ -180,8 +347,8 @@ optional_ptr<CatalogEntry> OrkideaSchemaEntry::LookupEntry(CatalogTransaction tr
 	if (lookup_info.GetCatalogType() != CatalogType::TABLE_ENTRY) {
 		return nullptr;
 	}
-	lock_guard<mutex> guard(lock);
 	if (!transaction.context) {
+		lock_guard<mutex> guard(lock);
 		auto cached = tables.find(lookup_info.GetEntryName());
 		return cached == tables.end() ? nullptr : cached->second.get();
 	}
@@ -193,16 +360,26 @@ void OrkideaSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (type != CatalogType::TABLE_ENTRY) {
 		return;
 	}
+	ListTables(context);
+	vector<string> undescribed;
+	{
+		lock_guard<mutex> guard(lock);
+		for (auto &table : table_names) {
+			if (!tables.count(table.first)) {
+				undescribed.push_back(table.first);
+			}
+		}
+	}
+	std::sort(undescribed.begin(), undescribed.end());
+	DescribeTables(context, undescribed);
+
 	vector<reference<CatalogEntry>> entries;
 	{
 		lock_guard<mutex> guard(lock);
-		ListTables(context);
 		for (auto &table : table_names) {
-			try {
-				entries.push_back(*DescribeTable(context, table.first));
-			} catch (std::exception &) {
-				// An invalid view, or one the user may not read, cannot be
-				// described or queried, so listings leave it out.
+			auto described = tables.find(table.first);
+			if (described != tables.end()) {
+				entries.push_back(*described->second);
 			}
 		}
 	}
@@ -281,7 +458,7 @@ optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateTable(CatalogTransaction tr
 	auto table_name = info.GetTableName().GetIdentifierName();
 	CheckCreatable(info);
 
-	lock_guard<mutex> guard(lock);
+	lock_guard<mutex> guard(ddl_lock);
 	auto existing = FindTable(context, table_name);
 	if (existing) {
 		switch (info.on_conflict) {
@@ -340,7 +517,6 @@ void OrkideaSchemaEntry::DropTable(ClientContext &context, OrkideaTableEntry &ta
 }
 
 void OrkideaSchemaEntry::ForgetTable(const string &oracle_name) {
-	lock_guard<mutex> guard(lock);
 	Retire(oracle_name);
 }
 
@@ -381,6 +557,8 @@ optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateType(CatalogTransaction, Cr
 }
 
 void OrkideaSchemaEntry::Retire(const string &oracle_name) {
+	lock_guard<mutex> guard(lock);
+	keys_cover.erase(oracle_name);
 	auto entry = tables.find(oracle_name);
 	if (entry != tables.end()) {
 		// DuckDB may still hold the entry for the statement that runs; it
@@ -447,7 +625,7 @@ void OrkideaSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) 
 	auto &alter = info.Cast<AlterTableInfo>();
 	auto &context = transaction.GetContext();
 	auto table_name = info.GetQualifiedName().Name().GetIdentifierName();
-	lock_guard<mutex> guard(lock);
+	lock_guard<mutex> guard(ddl_lock);
 	auto table = FindTable(context, table_name);
 	if (!table) {
 		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
@@ -557,7 +735,7 @@ void OrkideaSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		ThrowNotSupported("Dropping anything but tables");
 	}
 	auto table_name = info.GetQualifiedName().Name().GetIdentifierName();
-	lock_guard<mutex> guard(lock);
+	lock_guard<mutex> guard(ddl_lock);
 	auto table = FindTable(context, table_name);
 	if (!table) {
 		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {

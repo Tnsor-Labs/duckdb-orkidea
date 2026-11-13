@@ -44,6 +44,10 @@ string ArrowMetadataValue(const char *metadata, const string &key);
 //! independently released one.
 void CopyArrowSchema(const ArrowSchema &source, ArrowSchema &target);
 
+//! Copies a schema with `count` of its children from `offset`: the columns of
+//! one table in the schema of a query over several.
+void CopyArrowSchemaColumns(const ArrowSchema &source, idx_t offset, idx_t count, ArrowSchema &target);
+
 //! Runs a query and returns its result stream. The SQL is logged as OrkideaQuery.
 unique_ptr<StatementStream> OpenQuery(ClientContext &context, shared_ptr<Connection> connection, const string &sql);
 
