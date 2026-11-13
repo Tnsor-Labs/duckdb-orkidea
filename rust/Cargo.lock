@@ -719,8 +719,8 @@ dependencies = [
 
 [[package]]
 name = "orkidea-adbc"
-version = "0.4.0"
-source = "git+https://github.com/Tnsor-Labs/orkidea-adbc?rev=25c6471#25c6471da8aadd6e6b1e86ec33dd85a2442cfc7d"
+version = "0.4.1"
+source = "git+https://github.com/Tnsor-Labs/orkidea-adbc?tag=v0.4.1#126d35ef85824361588f5e45c55bd11c1a48dc6b"
 dependencies = [
  "adbc_core",
  "arrow-array",

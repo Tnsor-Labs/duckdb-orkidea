@@ -10,6 +10,14 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+Orkidea 0.3.0 lists attached databases without holding up other queries,
+and describes their tables 50 to a query, so the DuckDB UI's sidebar no
+longer stalls a session. It is built on the Orkidea ADBC driver 0.4.1, adds
+macOS x86_64 and Windows ARM64, and is tested against Oracle Database 23ai
+Free.
+
 ### Behaviour changes to read before upgrading
 
 - **`TIMESTAMP WITH LOCAL TIME ZONE` columns read as `TIMESTAMPTZ`** --
@@ -154,6 +162,7 @@ The first release: secrets, `ATTACH` with filter, projection, `LIMIT`, and
 top-N pushdown, parallel snapshot scans, writes inside DuckDB transactions,
 `orkidea_query`, and `orkidea_execute`.
 
-[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/releases/tag/v0.1.0
