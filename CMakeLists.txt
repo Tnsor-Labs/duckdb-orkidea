@@ -31,15 +31,15 @@ elseif("${OS_NAME}" STREQUAL "osx")
   endif()
 elseif(WIN32)
   if("${OS_ARCH}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR}" MATCHES
-                                       "^(ARM64|arm64|aarch64)$")
+                                      "^(ARM64|arm64|aarch64)$")
     set(Rust_CARGO_TARGET "aarch64-pc-windows-msvc")
   else()
     set(Rust_CARGO_TARGET "x86_64-pc-windows-msvc")
   endif()
 endif()
 
-# A toolchain installed for the host has only the host's standard library, so
-# a cross build needs its target added first.
+# A toolchain installed for the host has only the host's standard library, so a
+# cross build needs its target added first.
 find_program(RUSTUP rustup)
 if(Rust_CARGO_TARGET AND RUSTUP)
   execute_process(COMMAND ${RUSTUP} target add ${Rust_CARGO_TARGET}
@@ -65,6 +65,12 @@ corrosion_import_crate(
 # is MultiThreaded), so the driver and the C code it builds (aws-lc) must too.
 if(MSVC)
   corrosion_add_target_rustflags(orkidea_duckdb -Ctarget-feature=+crt-static)
+endif()
+
+# aws-lc's ARM64 assembly is in a syntax MSVC cannot assemble, so its C and
+# assembly are built with clang-cl there.
+if(Rust_CARGO_TARGET STREQUAL "aarch64-pc-windows-msvc")
+  corrosion_set_env_vars(orkidea_duckdb CC_PREFER_CLANG_CL_OVER_MSVC=1)
 endif()
 
 include_directories(src/include)
