@@ -50,27 +50,46 @@ if(Rust_CARGO_TARGET AND RUSTUP)
 endif()
 
 add_subdirectory(corrosion EXCLUDE_FROM_ALL)
-corrosion_import_crate(
-  MANIFEST_PATH
-  ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
-  CRATES
-  orkidea-duckdb
-  CRATE_TYPES
-  staticlib
-  PROFILE
-  release
-  LOCKED)
+
+# aws-lc's ARM64 assembly is in a syntax MSVC cannot assemble, so for Windows
+# ARM64 the C code that Cargo builds uses clang-cl. Corrosion hands cc-rs the
+# CMake C compiler; a function scope changes it for the import alone, and the
+# extension's own sources still build with MSVC.
+function(orkidea_import_driver)
+  if(Rust_CARGO_TARGET STREQUAL "aarch64-pc-windows-msvc")
+    find_program(
+      ORKIDEA_CLANG_CL clang-cl
+      HINTS
+        "$ENV{VSINSTALLDIR}/VC/Tools/Llvm/ARM64/bin"
+        "$ENV{ProgramFiles}/LLVM/bin"
+        "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/Llvm/ARM64/bin"
+        "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/Llvm/ARM64/bin"
+    )
+    if(NOT ORKIDEA_CLANG_CL)
+      message(
+        FATAL_ERROR "Windows ARM64 builds need clang-cl (LLVM) for aws-lc")
+    endif()
+    message(STATUS "Building the driver's C code with ${ORKIDEA_CLANG_CL}")
+    set(CMAKE_C_COMPILER "${ORKIDEA_CLANG_CL}")
+    set(CMAKE_CXX_COMPILER "${ORKIDEA_CLANG_CL}")
+  endif()
+  corrosion_import_crate(
+    MANIFEST_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
+    CRATES
+    orkidea-duckdb
+    CRATE_TYPES
+    staticlib
+    PROFILE
+    release
+    LOCKED)
+endfunction()
+orkidea_import_driver()
 
 # DuckDB links the C runtime statically on Windows (CMAKE_MSVC_RUNTIME_LIBRARY
 # is MultiThreaded), so the driver and the C code it builds (aws-lc) must too.
 if(MSVC)
   corrosion_add_target_rustflags(orkidea_duckdb -Ctarget-feature=+crt-static)
-endif()
-
-# aws-lc's ARM64 assembly is in a syntax MSVC cannot assemble, so its C and
-# assembly are built with clang-cl there.
-if(Rust_CARGO_TARGET STREQUAL "aarch64-pc-windows-msvc")
-  corrosion_set_env_vars(orkidea_duckdb CC_PREFER_CLANG_CL_OVER_MSVC=1)
 endif()
 
 include_directories(src/include)
