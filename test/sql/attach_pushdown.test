@@ -465,6 +465,30 @@ SELECT 'tsltz IS NULL', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) 
 ----
 
 query III
+SELECT 'tsltz < TIMESTAMPTZ ''2024-01-15 08:30:00+00''', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) FROM o.ORKIDEA_DUCK_FILTERS WHERE tsltz < TIMESTAMPTZ '2024-01-15 08:30:00+00') AS pushed, (SELECT list(id ORDER BY id) FROM local_copy WHERE tsltz < TIMESTAMPTZ '2024-01-15 08:30:00+00') AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
+SELECT 'tsltz >= TIMESTAMPTZ ''2024-01-15 08:30:00+00''', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) FROM o.ORKIDEA_DUCK_FILTERS WHERE tsltz >= TIMESTAMPTZ '2024-01-15 08:30:00+00') AS pushed, (SELECT list(id ORDER BY id) FROM local_copy WHERE tsltz >= TIMESTAMPTZ '2024-01-15 08:30:00+00') AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
+SELECT 'tsltz BETWEEN 2000 and 2025', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) FROM o.ORKIDEA_DUCK_FILTERS WHERE tsltz BETWEEN TIMESTAMPTZ '2000-01-01 00:00:00+00' AND TIMESTAMPTZ '2025-01-01 00:00:00+00') AS pushed, (SELECT list(id ORDER BY id) FROM local_copy WHERE tsltz BETWEEN TIMESTAMPTZ '2000-01-01 00:00:00+00' AND TIMESTAMPTZ '2025-01-01 00:00:00+00') AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
+SELECT 'tsltz = (SELECT max(tsltz) FROM local_copy)', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) FROM o.ORKIDEA_DUCK_FILTERS WHERE tsltz = (SELECT max(tsltz) FROM local_copy)) AS pushed, (SELECT list(id ORDER BY id) FROM local_copy WHERE tsltz = (SELECT max(tsltz) FROM local_copy)) AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
+SELECT 'ORDER BY tsltz ASC NULLS LAST LIMIT 3 OFFSET 0', pushed, local FROM (SELECT (SELECT list({'v': v, 'id': id} ORDER BY v ASC NULLS LAST, id) FROM (SELECT tsltz AS v, id FROM o.ORKIDEA_DUCK_FILTERS ORDER BY tsltz ASC NULLS LAST, id LIMIT 3 OFFSET 0)) AS pushed, (SELECT list({'v': v, 'id': id} ORDER BY v ASC NULLS LAST, id) FROM (SELECT tsltz AS v, id FROM local_copy ORDER BY tsltz ASC NULLS LAST, id LIMIT 3 OFFSET 0)) AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
+SELECT 'ORDER BY tsltz DESC NULLS FIRST LIMIT 2 OFFSET 1', pushed, local FROM (SELECT (SELECT list({'v': v, 'id': id} ORDER BY v DESC NULLS FIRST, id) FROM (SELECT tsltz AS v, id FROM o.ORKIDEA_DUCK_FILTERS ORDER BY tsltz DESC NULLS FIRST, id LIMIT 2 OFFSET 1)) AS pushed, (SELECT list({'v': v, 'id': id} ORDER BY v DESC NULLS FIRST, id) FROM (SELECT tsltz AS v, id FROM local_copy ORDER BY tsltz DESC NULLS FIRST, id LIMIT 2 OFFSET 1)) AS local) WHERE pushed IS DISTINCT FROM local;
+----
+
+query III
 SELECT 'r = ''\x00\xFF''::BLOB', pushed, local FROM (SELECT (SELECT list(id ORDER BY id) FROM o.ORKIDEA_DUCK_FILTERS WHERE r = '\x00\xFF'::BLOB) AS pushed, (SELECT list(id ORDER BY id) FROM local_copy WHERE r = '\x00\xFF'::BLOB) AS local) WHERE pushed IS DISTINCT FROM local;
 ----
 

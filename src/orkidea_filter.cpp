@@ -65,11 +65,9 @@ ColumnKind Classify(const string &oracle_type) {
 		return ColumnKind::DATE;
 	}
 	if (StringUtil::StartsWith(type, "TIMESTAMP")) {
-		// TIMESTAMP WITH LOCAL TIME ZONE reads in the session time zone, so it is left out.
-		if (StringUtil::EndsWith(type, " WITH LOCAL TIME ZONE")) {
-			return ColumnKind::NONE;
-		}
-		return StringUtil::EndsWith(type, " WITH TIME ZONE") ? ColumnKind::TIMESTAMP_TZ : ColumnKind::TIMESTAMP;
+		// WITH TIME ZONE and WITH LOCAL TIME ZONE values read as instants in UTC
+		// (TIMESTAMPTZ), and Oracle compares and sorts both as instants.
+		return StringUtil::EndsWith(type, " TIME ZONE") ? ColumnKind::TIMESTAMP_TZ : ColumnKind::TIMESTAMP;
 	}
 	if (is_sized("RAW(")) {
 		return ColumnKind::RAW;

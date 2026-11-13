@@ -1,7 +1,7 @@
 [package]
 name = "orkidea-duckdb"
 description = "The Orkidea Oracle ADBC driver, as a static library for the DuckDB extension"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -14,14 +14,14 @@ crate-type = ["staticlib"]
 [dependencies]
 adbc_core = "0.25"
 adbc_ffi = "0.25"
-oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", tag = "v0.3.0" }
+oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", rev = "25c6471" }
 
-# oracledb 26.0.0-beta.5 as the driver's own build uses it (see its
-# Cargo.toml): the fixes for oracle/rust-oracledb#80 and #83, and row sinks
-# (#85), which the driver's columnar fetching reads with, in files marked as
+# oracledb 26.0.0-beta.6 as the driver's own build uses it (see its
+# Cargo.toml): row sinks (oracle/rust-oracledb#85), which the driver's
+# columnar fetching reads with, and an OSON visitor, in files marked as
 # modified. Remove once a release includes them.
 [patch.crates-io]
-oracledb = { git = "https://github.com/Tnsor-Labs/rust-oracledb", rev = "0f147cd6232be5b8a631a1cbcff94b7e0882cc2e" }
+oracledb = { git = "https://github.com/Tnsor-Labs/rust-oracledb", rev = "d4939fd3d0268af31784eb2c425d6610e9f9d725" }
 
 [profile.release]
 lto = "thin"

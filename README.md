@@ -75,7 +75,6 @@ Oracle gives exactly the result DuckDB would:
   - Oracle stores an empty string as NULL, so filters with `''` aren't sent.
   - `CHAR` compares blank-padded, so only its NULL checks are sent.
   - String ranges are sent only against ASCII constants.
-  - `TIMESTAMP WITH LOCAL TIME ZONE` depends on the session time zone.
 - **LIMIT** becomes `FETCH FIRST n ROWS ONLY`, and **ORDER BY ... LIMIT**
   sends the order too, with explicit `NULLS FIRST`/`LAST`. Either one is sent
   only when every filter on the scan runs in Oracle, and an order only on
@@ -366,7 +365,7 @@ For Autonomous Database, unzip the wallet, point `CONFIG_DIR` and
 | `AUTH_MODE` | Privileged connection: `SYSDBA`, `SYSOPER`, and so on. |
 | `CONNECT_TIMEOUT_MS`, `CALL_TIMEOUT_MS` | Network connect timeout, and timeout per round trip. |
 | `STMT_CACHE_SIZE` | Statement cache size (default 20). |
-| `TIME_ZONE` | Session time zone, which determines how `TIMESTAMP WITH LOCAL TIME ZONE` values read. |
+| `TIME_ZONE` | Session time zone, for Oracle SQL that depends on it, such as `CURRENT_TIMESTAMP`. `TIMESTAMP WITH LOCAL TIME ZONE` columns read as `TIMESTAMPTZ` instants whatever it is. |
 | `EDITION` | Edition for edition-based redefinition. |
 
 `PASSWORD`, `WALLET_PASSWORD`, and `URI` are redacted in `duckdb_secrets()`.
