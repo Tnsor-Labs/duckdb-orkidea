@@ -1,7 +1,7 @@
 extension:
   name: orkidea
   description: Read, write, upsert, and alter Oracle Database tables through a Rust ADBC driver, with no Oracle client
-  version: 0.3.0
+  version: 0.3.1
   language: C++
   build: cmake
   license: Apache-2.0

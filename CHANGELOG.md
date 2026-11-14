@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-14
+
+Orkidea 0.3.1 describes listed tables 16 to a query instead of 50, which
+Oracle plans in a third of the time.
+
 ### Catalog
 
 - **Listings describe tables 16 to a query** -- @hc12r. They described up
@@ -173,7 +178,8 @@ The first release: secrets, `ATTACH` with filter, projection, `LIMIT`, and
 top-N pushdown, parallel snapshot scans, writes inside DuckDB transactions,
 `orkidea_query`, and `orkidea_execute`.
 
-[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/releases/tag/v0.1.0
