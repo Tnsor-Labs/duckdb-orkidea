@@ -109,6 +109,33 @@ Oracle gives exactly the result DuckDB would:
   turns this off. On a 10,000,000-row table, a `GROUP BY` with 50 groups
   took 1.5 s in Oracle instead of 3.2 s reading every row into DuckDB, over
   a local connection; over a network, the rows not sent count for more.
+- **Joins** of tables of one attached database, in any schemas, become one
+  Oracle query: inner, outer (`LEFT`, `RIGHT`, `FULL`), and the semi and
+  anti joins of `IN` and `[NOT] EXISTS`, on `=`, `<>`, `<`, `<=`, `>`,
+  `>=`, and `IS NOT DISTINCT FROM`. An aggregate or `DISTINCT` over the
+  join goes with it, so only the groups come back. Each table brings its
+  pushed filters. A join runs in Oracle when DuckDB estimates it, or the
+  aggregate over it, gives fewer rows than half of its largest table, and
+  when Oracle has no statistics to estimate with; a join that keeps as many
+  rows is faster in DuckDB, which reads the tables in parallel. Keys compare
+  as Oracle compares them:
+  - `NUMBER` keys compare exactly. DuckDB reads a `NUMBER` without a
+    precision as `DOUBLE`, and casts a `NUMBER(19)` key to `DOUBLE` to join
+    it with one, so keys beyond 2^53 that differ, which DuckDB finds equal,
+    don't match in Oracle.
+  - Strings join on `=` in any character set, and on ranges as `VARCHAR2`
+    in an AL32UTF8 database. `DATE` and `TIMESTAMP` join with each other,
+    `TIMESTAMP WITH [LOCAL] TIME ZONE` with each other, and `RAW`,
+    `BOOLEAN`, and binary floating point with their own kind.
+  - The join stays in DuckDB for `CHAR` keys (Oracle compares them
+    blank-padded), expression keys (`a.id + 1 = b.id`), filters DuckDB
+    applies (`ILIKE`), DuckDB tables, and tables of two attached databases:
+    attach once, without `SCHEMA`, to join tables of several schemas.
+
+  `EXPLAIN` shows the Oracle SQL. `SET orkidea_join_pushdown = false` turns
+  this off. On the lab's 1,000,000 orders, total sales by region, over
+  orders, customers, and regions, take 0.18 s instead of 0.35 s, and 0.20 s
+  instead of 0.57 s with 10 ms between DuckDB and Oracle.
 
 ### Parallel scans
 

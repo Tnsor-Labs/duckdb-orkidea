@@ -10,6 +10,27 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+### Queries
+
+- **Joins run in Oracle** -- @hc12r. A join of tables of one attached
+  database, in any schemas, becomes one Oracle query, with the filters
+  pushed into each table: inner and outer joins, and the semi and anti
+  joins of `IN` and `[NOT] EXISTS`, on comparisons Oracle makes as DuckDB
+  does. An aggregate or `DISTINCT` over the join goes with it. A join runs
+  in Oracle when it, or the aggregate over it, is estimated to give fewer
+  rows than half of its largest table, or without Oracle statistics;
+  others are faster in DuckDB, which reads the tables in parallel. On the
+  lab's 1,000,000 orders, total sales by region over three tables take
+  0.18 s instead of 0.35 s, and 0.20 s instead of 0.57 s with 10 ms between
+  DuckDB and Oracle. `SET orkidea_join_pushdown = false` turns it off. A
+  test compares every join's result with DuckDB's.
+- **`NUMBER` join keys compare exactly** -- @hc12r. DuckDB casts a
+  `NUMBER(19)` key to `DOUBLE` to join it with a `NUMBER` without a
+  precision, read as `DOUBLE`; in Oracle, the cast is left out and the
+  numbers compare exactly, so keys beyond 2^53 that differ no longer match.
+- **Filters on `FLOAT(p)` columns run in Oracle** -- @hc12r. A `FLOAT` is a
+  `NUMBER`, read as `DOUBLE`, and is now filtered as one.
+
 ### Catalog
 
 - **`COLUMNS 'dictionary'` lists tables from the data dictionary** --

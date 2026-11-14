@@ -1624,8 +1624,38 @@ query III
 SELECT 'SELECT sm, count(*) FROM t GROUP BY sm HAVING count(*) > 1', pushed, local FROM (SELECT (SELECT list(r ORDER BY r) FROM (SELECT sm, count(*) FROM o.ORKIDEA_DUCK_FILTERS GROUP BY sm HAVING count(*) > 1) r) AS pushed, (SELECT list(r ORDER BY r) FROM (SELECT sm, count(*) FROM local_copy GROUP BY sm HAVING count(*) > 1) r) AS local) WHERE pushed IS DISTINCT FROM local;
 ----
 
+# A FLOAT(p) is a NUMBER read as DOUBLE, filtered as an unconstrained
+# NUMBER is.
+statement ok
+FROM orkidea_execute('ora', 'BEGIN EXECUTE IMMEDIATE ''DROP TABLE ORKIDEA_DUCK_FLOATS PURGE''; EXCEPTION WHEN OTHERS THEN NULL; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE ORKIDEA_DUCK_FLOATS (id NUMBER(3), f FLOAT, f63 FLOAT(63))');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT ALL INTO ORKIDEA_DUCK_FLOATS VALUES (1, 0.1, 2.5) INTO ORKIDEA_DUCK_FLOATS VALUES (2, 0.30000000000000004, -1) INTO ORKIDEA_DUCK_FLOATS VALUES (3, NULL, 1e20) SELECT 1 FROM dual');
+
+# The count runs in Oracle only when Oracle applies every filter.
+query II
+EXPLAIN SELECT count(*) FROM o.orkidea_duck_floats WHERE f > 0.2 AND f63 < 3;
+----
+physical_plan	<REGEX>:.*WHERE "F" > 0\.2d AND "F63" < 3\.0d.*
+
+query I
+SELECT id FROM o.orkidea_duck_floats WHERE f > 0.2 AND f63 < 3 ORDER BY id;
+----
+2
+
+query I
+SELECT id FROM o.orkidea_duck_floats WHERE f = 0.1 ORDER BY id;
+----
+1
+
 statement ok
 DETACH o;
 
 statement ok
 FROM orkidea_execute('ora', 'DROP TABLE ORKIDEA_DUCK_FILTERS PURGE');
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE ORKIDEA_DUCK_FLOATS PURGE');

@@ -1,0 +1,874 @@
+# name: test/sql/attach_join.test
+# description: Joins of tables of one attached Oracle database run in Oracle, with the results DuckDB gives; joins Oracle cannot compute exactly stay in DuckDB.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_JP\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP TABLE "'' || t.table_name || ''" PURGE''; END LOOP; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_a (id NUMBER, k NUMBER(5), d DATE, s VARCHAR2(10), ns NVARCHAR2(10), c CHAR(3), amt NUMBER(10,2), b BOOLEAN, f BINARY_DOUBLE)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (1, 1, DATE ''2025-01-01'', ''a'', N''a'', ''a'', 1.5, TRUE, 1.5)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (2, 2, DATE ''2025-01-02'', ''b'', N''b'', ''b'', 2.25, FALSE, 2)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (4, 4, DATE ''2025-01-04'', ''dd'', N''dd'', ''d'', 4, TRUE, 4)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (4, 4, DATE ''2025-01-04'', ''dd'', N''dd'', ''d'', 4, TRUE, 4)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (5, 5, DATE ''2025-01-05'', ''é'', N''é'', ''e'', 5, FALSE, BINARY_DOUBLE_NAN)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_a VALUES (6, 7, DATE ''2025-01-06'', ''f'', N''f'', ''f'', 6, NULL, 6)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_b (id NUMBER(19), ts TIMESTAMP(3), s VARCHAR2(20), ns NVARCHAR2(5), f BINARY_DOUBLE, a_k NUMBER(9))');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (1, TIMESTAMP ''2025-01-01 00:00:00'', ''a'', N''a'', 1.5, 1)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (2, TIMESTAMP ''2025-01-02 00:00:00.5'', ''b'', N''b'', 2, 2)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (2, TIMESTAMP ''2025-01-02 00:00:00'', ''bb'', N''bb'', 2, 2)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (4, TIMESTAMP ''2025-01-04 00:00:00'', ''dd'', N''dd'', 4, 4)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (5, TIMESTAMP ''2025-01-05 12:00:00'', ''é'', N''é'', BINARY_DOUBLE_NAN, 5)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (7, NULL, ''zz'', NULL, NULL, NULL)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_b VALUES (NULL, NULL, NULL, NULL, NULL, NULL)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_c (k NUMBER(5), label VARCHAR2(10))');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_c VALUES (1, ''one'')');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_c VALUES (2, ''two'')');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_c VALUES (4, ''four'')');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_jp_c VALUES (9, ''nine'')');
+
+statement ok
+ATTACH 'ora' AS o (TYPE orkidea);
+
+statement ok
+ATTACH 'ora' AS o2 (TYPE orkidea);
+
+statement ok
+CREATE TABLE local AS SELECT * FROM (VALUES (1, 'x'), (4, 'y')) t(id, v);
+
+# NUMBER and NUMBER(19) keys, which DuckDB casts to DOUBLE.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, a.s, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, a.s, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, a.s, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, a.s, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# Filters on both sides.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.s FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.amt > 1 AND b.s <> 'zz';
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.s FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.amt > 1 AND b.s <> 'zz';
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.s FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.amt > 1 AND b.s <> 'zz' EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.s FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.amt > 1 AND b.s <> 'zz'));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# LEFT JOIN, with a filter on the right side in ON and one on the left in WHERE.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.s FROM o.orkidea_jp_a a LEFT JOIN o.orkidea_jp_b b ON a.id = b.id AND b.s <> 'bb' WHERE a.id > 1;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.s FROM o.orkidea_jp_a a LEFT JOIN o.orkidea_jp_b b ON a.id = b.id AND b.s <> 'bb' WHERE a.id > 1;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.s FROM o.orkidea_jp_a a LEFT JOIN o.orkidea_jp_b b ON a.id = b.id AND b.s <> 'bb' WHERE a.id > 1 EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.s FROM o.orkidea_jp_a a LEFT JOIN o.orkidea_jp_b b ON a.id = b.id AND b.s <> 'bb' WHERE a.id > 1));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# RIGHT JOIN.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id, b.s FROM o.orkidea_jp_a a RIGHT JOIN o.orkidea_jp_b b ON a.k = b.a_k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id, b.s FROM o.orkidea_jp_a a RIGHT JOIN o.orkidea_jp_b b ON a.k = b.a_k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id, b.s FROM o.orkidea_jp_a a RIGHT JOIN o.orkidea_jp_b b ON a.k = b.a_k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id, b.s FROM o.orkidea_jp_a a RIGHT JOIN o.orkidea_jp_b b ON a.k = b.a_k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+8
+
+# FULL JOIN.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, a.k, b.id, b.a_k FROM o.orkidea_jp_a a FULL JOIN o.orkidea_jp_b b ON a.k = b.a_k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, a.k, b.id, b.a_k FROM o.orkidea_jp_a a FULL JOIN o.orkidea_jp_b b ON a.k = b.a_k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, a.k, b.id, b.a_k FROM o.orkidea_jp_a a FULL JOIN o.orkidea_jp_b b ON a.k = b.a_k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, a.k, b.id, b.a_k FROM o.orkidea_jp_a a FULL JOIN o.orkidea_jp_b b ON a.k = b.a_k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+10
+
+# IN, a semi join.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, a.s FROM o.orkidea_jp_a a WHERE a.id IN (SELECT id FROM o.orkidea_jp_b);
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, a.s FROM o.orkidea_jp_a a WHERE a.id IN (SELECT id FROM o.orkidea_jp_b);
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, a.s FROM o.orkidea_jp_a a WHERE a.id IN (SELECT id FROM o.orkidea_jp_b) EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, a.s FROM o.orkidea_jp_a a WHERE a.id IN (SELECT id FROM o.orkidea_jp_b)));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# EXISTS, a semi join.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id FROM o.orkidea_jp_a a WHERE EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k);
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id FROM o.orkidea_jp_a a WHERE EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k);
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id FROM o.orkidea_jp_a a WHERE EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k) EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id FROM o.orkidea_jp_a a WHERE EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k)));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# NOT EXISTS, an anti join.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id FROM o.orkidea_jp_a a WHERE NOT EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k);
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id FROM o.orkidea_jp_a a WHERE NOT EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k);
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id FROM o.orkidea_jp_a a WHERE NOT EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k) EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id FROM o.orkidea_jp_a a WHERE NOT EXISTS (SELECT 1 FROM o.orkidea_jp_b b WHERE b.a_k = a.k)));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+2
+
+# NOT IN, which NULLs make empty.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id FROM o.orkidea_jp_a a WHERE a.id NOT IN (SELECT id FROM o.orkidea_jp_b);
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id FROM o.orkidea_jp_a a WHERE a.id NOT IN (SELECT id FROM o.orkidea_jp_b) EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id FROM o.orkidea_jp_a a WHERE a.id NOT IN (SELECT id FROM o.orkidea_jp_b)));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+0
+
+# DATE and TIMESTAMP(3) keys.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.d = b.ts;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.d = b.ts;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.d = b.ts EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.ts FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.d = b.ts));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+4
+
+# VARCHAR2 keys, with a non-ASCII value.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.s;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.s;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.s EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.s));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# NVARCHAR2 keys.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.ns = b.ns;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.ns = b.ns;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.ns = b.ns EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.ns = b.ns));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# VARCHAR2 and NVARCHAR2 keys.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.ns;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.ns;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.ns EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.s = b.ns));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# An equality and a range.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.id <= b.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.id <= b.id;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.id <= b.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.id <= b.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# Only ranges.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id < b.id AND a.k <= b.a_k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id < b.id AND a.k <= b.a_k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id < b.id AND a.k <= b.a_k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id < b.id AND a.k <= b.a_k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+8
+
+# IS NOT DISTINCT FROM, which matches NULLs.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k IS NOT DISTINCT FROM b.a_k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k IS NOT DISTINCT FROM b.a_k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k IS NOT DISTINCT FROM b.a_k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k IS NOT DISTINCT FROM b.a_k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+8
+
+# BINARY_DOUBLE keys, NaN included.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.f = b.f;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.f = b.f;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.f = b.f EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.f = b.f));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# BOOLEAN keys.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.b = a2.b;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.b = a2.b;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.b = a2.b EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.b = a2.b));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+13
+
+# Three tables.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.s, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id JOIN o.orkidea_jp_c c ON c.k = a.k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.s, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id JOIN o.orkidea_jp_c c ON c.k = a.k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.s, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id JOIN o.orkidea_jp_c c ON c.k = a.k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.s, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id JOIN o.orkidea_jp_c c ON c.k = a.k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# A self join.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.id = a2.k;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.id = a2.k;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.id = a2.k EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a1.id, a2.id FROM o.orkidea_jp_a a1 JOIN o.orkidea_jp_a a2 ON a1.id = a2.k));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+7
+
+# Count(*), of no columns.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT count(*) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT count(*) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT count(*) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT count(*) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+1
+
+# An aggregate over the join, in DuckDB.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT b.s, count(*), sum(a.amt) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id GROUP BY b.s;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT b.s, count(*), sum(a.amt) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id GROUP BY b.s;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT b.s, count(*), sum(a.amt) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id GROUP BY b.s EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT b.s, count(*), sum(a.amt) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id GROUP BY b.s));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+5
+
+# A CHAR key, which Oracle compares blank-padded.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.c = b.s;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.c = b.s;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.c = b.s EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.c = b.s));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+0
+
+# NVARCHAR2 ranges, which Oracle sorts in UTF-16.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.ns < b.ns;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.ns < b.ns;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.ns < b.ns EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.k = b.a_k AND a.ns < b.ns));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+1
+
+# An expression key.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id + 1 = b.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id + 1 = b.id;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id + 1 = b.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id + 1 = b.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# A filter DuckDB applies.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.s ILIKE 'D%';
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.s ILIKE 'D%';
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.s ILIKE 'D%' EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o.orkidea_jp_b b ON a.id = b.id WHERE a.s ILIKE 'D%'));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+2
+
+# A DuckDB table.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, l.v FROM o.orkidea_jp_a a JOIN local l ON a.id = l.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, l.v FROM o.orkidea_jp_a a JOIN local l ON a.id = l.id;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, l.v FROM o.orkidea_jp_a a JOIN local l ON a.id = l.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, l.v FROM o.orkidea_jp_a a JOIN local l ON a.id = l.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+3
+
+# Tables of two attached databases.
+statement ok
+SET orkidea_join_pushdown = false;
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o2.orkidea_jp_b b ON a.id = b.id;
+
+statement ok
+RESET orkidea_join_pushdown;
+
+query II
+EXPLAIN SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o2.orkidea_jp_b b ON a.id = b.id;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+SELECT (SELECT count(*) FROM (SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o2.orkidea_jp_b b ON a.id = b.id EXCEPT ALL FROM expected)), (SELECT count(*) FROM (FROM expected EXCEPT ALL SELECT a.id, b.id FROM o.orkidea_jp_a a JOIN o2.orkidea_jp_b b ON a.id = b.id));
+----
+0	0
+
+query I
+SELECT count(*) FROM expected;
+----
+6
+
+# Oracle compares NUMBER keys exactly: two that read as the same DOUBLE
+# match in DuckDB, which compares them rounded, and not in Oracle.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_big (id NUMBER)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_big19 (id NUMBER(19))');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT ALL INTO orkidea_jp_big VALUES (9007199254740993) INTO orkidea_jp_big19 VALUES (9007199254740992) SELECT 1 FROM dual');
+
+query I
+SELECT count(*) FROM o.orkidea_jp_big x JOIN o.orkidea_jp_big19 y ON x.id = y.id;
+----
+0
+
+statement ok
+SET orkidea_join_pushdown = false;
+
+query I
+SELECT count(*) FROM o.orkidea_jp_big x JOIN o.orkidea_jp_big19 y ON x.id = y.id;
+----
+1
+
+statement ok
+RESET orkidea_join_pushdown;
+
+# With Oracle statistics, a join that keeps as many rows as its largest table
+# stays in DuckDB, which reads the tables in parallel, and an aggregate over
+# it runs in Oracle when it has fewer groups than half of those rows.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_fact (n NUMBER(6), k NUMBER(3))');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_jp_dim (k NUMBER(3), name VARCHAR2(10))');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN INSERT INTO orkidea_jp_fact SELECT level, MOD(level, 10) FROM dual CONNECT BY level <= 1000; INSERT INTO orkidea_jp_dim SELECT level - 1, ''k'' || (level - 1) FROM dual CONNECT BY level <= 10; COMMIT; DBMS_STATS.GATHER_TABLE_STATS(USER, ''ORKIDEA_JP_FACT''); DBMS_STATS.GATHER_TABLE_STATS(USER, ''ORKIDEA_JP_DIM''); END;');
+
+statement ok
+ATTACH 'ora' AS s (TYPE orkidea);
+
+query II
+EXPLAIN SELECT f.n, d.name FROM s.orkidea_jp_fact f JOIN s.orkidea_jp_dim d ON f.k = d.k;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+query II
+EXPLAIN SELECT d.name, count(*), sum(f.n) FROM s.orkidea_jp_fact f JOIN s.orkidea_jp_dim d ON f.k = d.k GROUP BY d.name;
+----
+physical_plan	<REGEX>:.*GROUP BY.*
+
+query TII
+SELECT d.name, count(*), sum(f.n) FROM s.orkidea_jp_fact f JOIN s.orkidea_jp_dim d ON f.k = d.k GROUP BY d.name ORDER BY d.name LIMIT 2;
+----
+k0	100	50500
+k1	100	49600
+
+query II
+EXPLAIN SELECT f.n, count(*) FROM s.orkidea_jp_fact f JOIN s.orkidea_jp_dim d ON f.k = d.k GROUP BY f.n;
+----
+physical_plan	<!REGEX>:.*Orkidea Remote Query.*
+
+statement ok
+DETACH s;
+
+# A join in Oracle sees the transaction's own writes.
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO o.orkidea_jp_c VALUES (7, 'seven');
+
+query IT
+SELECT a.id, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_c c ON a.k = c.k WHERE c.k = 7;
+----
+6	seven
+
+query II
+EXPLAIN SELECT a.id, c.label FROM o.orkidea_jp_a a JOIN o.orkidea_jp_c c ON a.k = c.k WHERE c.k = 7;
+----
+physical_plan	<REGEX>:.*Orkidea Remote Query.*
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM o.orkidea_jp_a a JOIN o.orkidea_jp_c c ON a.k = c.k WHERE c.k = 7;
+----
+0
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT table_name FROM user_tables WHERE table_name LIKE ''ORKIDEA\_JP\_%'' ESCAPE ''\'') LOOP EXECUTE IMMEDIATE ''DROP TABLE "'' || t.table_name || ''" PURGE''; END LOOP; END;');

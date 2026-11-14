@@ -3,10 +3,11 @@
 //
 // orkidea_optimizer.hpp
 //
-// Pushes LIMIT, and the ORDER BY of a top-N, into Oracle scans, so that
-// Oracle returns only the rows the query can use (ORDER BY ... FETCH FIRST n
-// ROWS ONLY). DuckDB's own LIMIT or top-N stays in the plan, so a pushed limit
-// only ever saves fetching rows.
+// Pushes work into Oracle: LIMIT, and the ORDER BY of a top-N, into scans
+// (ORDER BY ... FETCH FIRST n ROWS ONLY), with DuckDB's own LIMIT or top-N
+// kept in the plan; and aggregates, DISTINCT, and joins of tables of one
+// attached database, which become queries of their own (orkidea_remote_query)
+// when Oracle computes them as DuckDB would.
 //===----------------------------------------------------------------------===//
 
 #pragma once

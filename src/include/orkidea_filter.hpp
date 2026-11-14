@@ -39,6 +39,14 @@ struct TranslatedFilter {
 //! Whether comparisons on columns of this Oracle type can be pushed down.
 bool CanCompareColumn(const string &oracle_type);
 
+//! Whether Oracle compares columns of the two types with `comparison` as
+//! DuckDB compares the values it reads of them: as strings, dates and
+//! timestamps, instants, raw bytes, or binary floating point. NUMBER columns
+//! compare as exact numbers, where DuckDB compares those it reads as DOUBLE
+//! rounded. `utf8_byte_order`: the database character set is AL32UTF8.
+bool CanCompareColumns(const string &left_type, const string &right_type, ExpressionType comparison,
+                       bool utf8_byte_order);
+
 //! Whether Oracle's ORDER BY on columns of this type (with NLS_SORT = BINARY)
 //! sorts as DuckDB does. `utf8_byte_order`: the database character set is AL32UTF8.
 bool CanOrderColumn(const string &oracle_type, bool utf8_byte_order);

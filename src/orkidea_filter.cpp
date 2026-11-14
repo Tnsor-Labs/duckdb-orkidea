@@ -46,7 +46,9 @@ ColumnKind Classify(const string &oracle_type) {
 	auto is_sized = [&](const char *prefix) {
 		return StringUtil::StartsWith(type, prefix) && StringUtil::EndsWith(type, ")");
 	};
-	if (type == "NUMBER" || is_sized("NUMBER(")) {
+	// FLOAT(p) is a NUMBER with a binary precision, read as DOUBLE as an
+	// unconstrained NUMBER is.
+	if (type == "NUMBER" || is_sized("NUMBER(") || is_sized("FLOAT(")) {
 		return ColumnKind::NUMBER;
 	}
 	if (type == "BINARY_FLOAT") {
@@ -490,6 +492,40 @@ private:
 };
 
 } // namespace
+
+bool CanCompareColumns(const string &left_type, const string &right_type, ExpressionType comparison,
+                       bool utf8_byte_order) {
+	auto left = Classify(left_type);
+	auto right = Classify(right_type);
+	auto either = [&](ColumnKind a, ColumnKind b) {
+		return (left == a || left == b) && (right == a || right == b);
+	};
+	bool ordered = comparison != ExpressionType::COMPARE_EQUAL && comparison != ExpressionType::COMPARE_NOTEQUAL &&
+	               comparison != ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+	if (left == ColumnKind::NUMBER && right == ColumnKind::NUMBER) {
+		// Oracle compares the exact numbers, which DuckDB reads as DOUBLE
+		// when they have no declared precision: the comparison DuckDB makes
+		// of the values it reads, without their rounding.
+		return true;
+	}
+	if (either(ColumnKind::BINARY_FLOAT, ColumnKind::BINARY_DOUBLE) ||
+	    either(ColumnKind::DATE, ColumnKind::TIMESTAMP)) {
+		return true;
+	}
+	if ((left == ColumnKind::TIMESTAMP_TZ && right == ColumnKind::TIMESTAMP_TZ) ||
+	    (left == ColumnKind::RAW && right == ColumnKind::RAW)) {
+		return true;
+	}
+	if (left == ColumnKind::BOOLEAN && right == ColumnKind::BOOLEAN) {
+		return !ordered;
+	}
+	if (either(ColumnKind::VARCHAR, ColumnKind::NVARCHAR)) {
+		// Equal strings are equal in any character set; only AL32UTF8
+		// VARCHAR2 values sort in DuckDB's order (see CanOrderColumn).
+		return !ordered || (left == ColumnKind::VARCHAR && right == ColumnKind::VARCHAR && utf8_byte_order);
+	}
+	return false;
+}
 
 bool CanCompareColumn(const string &oracle_type) {
 	auto kind = Classify(oracle_type);
