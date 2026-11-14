@@ -14,7 +14,7 @@ crate-type = ["staticlib"]
 [dependencies]
 adbc_core = "0.25"
 adbc_ffi = "0.25"
-oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", rev = "724e12841b3c7d740608e86ba4b43618e58c6fc7" }
+oracle_adbc = { package = "orkidea-adbc", git = "https://github.com/Tnsor-Labs/orkidea-adbc", tag = "v0.5.0" }
 
 # oracledb 26.0.0-beta.6 as the driver's own build uses it (see its
 # Cargo.toml): row sinks (oracle/rust-oracledb#85), which the driver's

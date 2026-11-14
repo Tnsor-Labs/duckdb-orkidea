@@ -23,7 +23,7 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
   instead of 1.6 s with 50 ms between DuckDB and Oracle once Oracle has the
   plans. A test checks that both modes list every table of the test schema
   with the same columns. Built on the Orkidea driver's
-  `oracle.table_schemas`.
+  `oracle.table_schemas`, in its 0.5.0.
 - **An altered table stays listed** -- @hc12r. After an `ALTER TABLE` from
   DuckDB, the table was left out of `duckdb_tables()` and
   `duckdb_columns()` until a statement used it; a renamed one, under its
