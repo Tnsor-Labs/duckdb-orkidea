@@ -28,6 +28,19 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
   `NUMBER(19)` key to `DOUBLE` to join it with a `NUMBER` without a
   precision, read as `DOUBLE`; in Oracle, the cast is left out and the
   numbers compare exactly, so keys beyond 2^53 that differ no longer match.
+- **`IN` lists longer than 1,000 values run in Oracle** -- @hc12r. They
+  stayed in DuckDB, as Oracle takes at most 1,000 values per list; up to
+  10,000 are now sent as lists of 1,000 joined by `OR`. That includes the
+  list of keys a join with a DuckDB table or file filters the Oracle table
+  with, which has up to `dynamic_or_filter_threshold` keys: with 3,000
+  receipts from a CSV file out of 100,000 rows and the threshold at 3,000,
+  the query takes 0.06 s instead of 0.21 s with 10 ms between DuckDB and
+  Oracle.
+- **The range of a join's keys runs in Oracle** -- @hc12r. When a join with
+  a DuckDB table or file has more keys than that, DuckDB filters the Oracle
+  table with a summary of them, which was not sent; for integer, decimal,
+  date, and timestamp keys, their smallest and largest are now, as
+  `key >= min AND key <= max`.
 - **Filters on `FLOAT(p)` columns run in Oracle** -- @hc12r. A `FLOAT` is a
   `NUMBER`, read as `DOUBLE`, and is now filtered as one.
 

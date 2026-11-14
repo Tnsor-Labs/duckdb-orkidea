@@ -84,6 +84,18 @@ Oracle gives exactly the result DuckDB would:
   - Oracle stores an empty string as NULL, so filters with `''` aren't sent.
   - `CHAR` compares blank-padded, so only its NULL checks are sent.
   - String ranges are sent only against ASCII constants.
+  - `IN` lists of up to 10,000 values are sent, as lists of 1,000 joined by
+    `OR` (Oracle's limit per list); longer ones stay in DuckDB.
+- **Join keys from DuckDB**: a join of an Oracle table with a DuckDB table or
+  file, as `WHERE t.receipt IN (SELECT rcx FROM 'file.csv')`, reads the
+  other side first, and the scan of the Oracle table gets a filter of its
+  keys: their list, up to `dynamic_or_filter_threshold` keys (50 by
+  default; `SET dynamic_or_filter_threshold = 10000` sends up to 10,000), or
+  else, for integer, decimal, date, and timestamp keys, their range
+  (`"ID" >= 40001 AND "ID" <= 40991`). String keys past the threshold read
+  the whole table: their range is not known. With 3,000 receipts out of
+  100,000 rows and the threshold at 3,000, the query took 0.06 s instead of
+  0.21 s with 10 ms between DuckDB and Oracle.
 - **LIMIT** becomes `FETCH FIRST n ROWS ONLY`, and **ORDER BY ... LIMIT**
   sends the order too, with explicit `NULLS FIRST`/`LAST`. Either one is sent
   only when every filter on the scan runs in Oracle, and an order only on

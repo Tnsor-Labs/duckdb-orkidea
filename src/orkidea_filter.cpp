@@ -21,8 +21,12 @@ namespace {
 
 //! Longest string literal Oracle accepts in SQL without extended strings.
 constexpr idx_t MAX_LITERAL_BYTES = 4000;
-//! Oracle allows at most 1000 expressions in an IN list.
+//! Oracle allows at most 1000 expressions in an IN list; longer ones are sent
+//! as several, joined by OR.
 constexpr idx_t MAX_IN_LIST = 1000;
+//! The most values an IN filter sends, in all its lists: longer ones, which
+//! take Oracle longer to parse than to filter, are applied in DuckDB.
+constexpr idx_t MAX_IN_VALUES = 10000;
 
 enum class ColumnKind {
 	//! Not filtered in Oracle.
@@ -326,6 +330,125 @@ optional_ptr<const Expression> OptionalFilterChild(const BoundFunctionExpression
 	return nullptr;
 }
 
+//! The smallest and largest key a prefix-range filter lets through. DuckDB
+//! builds one from the keys of a join's other side, and its range lookups
+//! compare with the exact smallest and largest key before anything else, so
+//! a binary search with them finds both. False for keys other than integers,
+//! decimals, dates, and timestamps, whose lookups compare string prefixes,
+//! and for a filter not built yet.
+bool PrefixRangeBounds(const PrefixRangeFunctionData &data, Value &min, Value &max) {
+	auto &type = data.key_type;
+	if (!data.filter || !data.filter->IsInitialized()) {
+		return false;
+	}
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		break;
+	default:
+		return false;
+	}
+	// The values the key's storage holds.
+	int64_t lowest;
+	int64_t highest;
+	switch (type.InternalType()) {
+	case PhysicalType::INT8:
+		lowest = NumericLimits<int8_t>::Minimum();
+		highest = NumericLimits<int8_t>::Maximum();
+		break;
+	case PhysicalType::INT16:
+		lowest = NumericLimits<int16_t>::Minimum();
+		highest = NumericLimits<int16_t>::Maximum();
+		break;
+	case PhysicalType::INT32:
+		lowest = NumericLimits<int32_t>::Minimum();
+		highest = NumericLimits<int32_t>::Maximum();
+		break;
+	case PhysicalType::INT64:
+		lowest = NumericLimits<int64_t>::Minimum();
+		highest = NumericLimits<int64_t>::Maximum();
+		break;
+	case PhysicalType::UINT8:
+		lowest = 0;
+		highest = NumericLimits<uint8_t>::Maximum();
+		break;
+	case PhysicalType::UINT16:
+		lowest = 0;
+		highest = NumericLimits<uint16_t>::Maximum();
+		break;
+	case PhysicalType::UINT32:
+		lowest = 0;
+		highest = NumericLimits<uint32_t>::Maximum();
+		break;
+	default:
+		return false;
+	}
+	if (type.id() == LogicalTypeId::DECIMAL) {
+		int64_t limit = 1;
+		for (idx_t digit = 0; digit < DecimalType::GetWidth(type); digit++) {
+			limit *= 10;
+		}
+		lowest = MaxValue(lowest, -(limit - 1));
+		highest = MinValue(highest, limit - 1);
+	}
+	auto value = [&](int64_t raw) {
+		return Value::Numeric(type, raw);
+	};
+	auto lowest_value = value(lowest);
+	auto highest_value = value(highest);
+	// Whether a key is at most `raw`, and whether one is at least `raw`.
+	auto any_at_most = [&](int64_t raw) {
+		return data.filter->LookupRange(lowest_value, value(raw)) != FilterPropagateResult::FILTER_ALWAYS_FALSE;
+	};
+	auto any_at_least = [&](int64_t raw) {
+		return data.filter->LookupRange(value(raw), highest_value) != FilterPropagateResult::FILTER_ALWAYS_FALSE;
+	};
+	if (!any_at_most(highest)) {
+		return false;
+	}
+	// The smallest raw value with a key at most it, and the largest with a
+	// key at least it. Half the distance is computed unsigned: it can exceed
+	// what int64_t holds.
+	auto half = [](int64_t low, int64_t high) {
+		return static_cast<int64_t>((static_cast<uint64_t>(high) - static_cast<uint64_t>(low)) / 2);
+	};
+	auto low = lowest;
+	auto high = highest;
+	while (low < high) {
+		auto middle = low + half(low, high);
+		if (any_at_most(middle)) {
+			high = middle;
+		} else {
+			low = middle + 1;
+		}
+	}
+	min = value(low);
+	low = lowest;
+	high = highest;
+	while (low < high) {
+		auto middle = high - half(low, high);
+		if (any_at_least(middle)) {
+			low = middle;
+		} else {
+			high = middle - 1;
+		}
+	}
+	max = value(high);
+	return true;
+}
+
 //! A filter Oracle applies exactly.
 TranslatedFilter Exact(string sql) {
 	return TranslatedFilter {std::move(sql), false};
@@ -366,13 +489,42 @@ public:
 
 private:
 	//! Optional filters may be applied or not, so they never need local
-	//! evaluation. Other internal filters (dynamic, Bloom) are not pushed.
+	//! evaluation. A prefix-range filter on a join key becomes the range of
+	//! its keys. Other internal filters (dynamic, Bloom) are not pushed.
 	TranslatedFilter TranslateInternal(const BoundFunctionExpression &func) const {
+		if (func.Function().GetName() == PrefixRangeScalarFun::NAME) {
+			return TranslatedFilter {TranslatePrefixRange(func), false};
+		}
 		auto child = OptionalFilterChild(func);
 		if (!child) {
 			return TranslatedFilter {string(), false};
 		}
 		return TranslatedFilter {Translate(*child).sql, false};
+	}
+
+	//! `key >= min AND key <= max`, as Oracle conditions; empty when the
+	//! bounds are not known or not sent.
+	string TranslatePrefixRange(const BoundFunctionExpression &func) const {
+		if (!func.BindInfo() || func.GetChildren().size() != 1) {
+			return string();
+		}
+		Value min;
+		Value max;
+		if (!PrefixRangeBounds(func.BindInfo()->Cast<PrefixRangeFunctionData>(), min, max)) {
+			return string();
+		}
+		auto &key = *func.GetChildren()[0];
+		auto bound = [&](ExpressionType type, const Value &value) {
+			auto comparison =
+			    BoundComparisonExpression::Create(type, key.Copy(), make_uniq<BoundConstantExpression>(value));
+			return Translate(*comparison);
+		};
+		auto lower = bound(ExpressionType::COMPARE_GREATERTHANOREQUALTO, min);
+		auto upper = bound(ExpressionType::COMPARE_LESSTHANOREQUALTO, max);
+		if (lower.sql.empty() || lower.evaluate_locally || upper.sql.empty() || upper.evaluate_locally) {
+			return string();
+		}
+		return lower.sql + " AND " + upper.sql;
 	}
 
 	TranslatedFilter TranslateComparison(const BoundFunctionExpression &comparison) const {
@@ -465,7 +617,7 @@ private:
 		case ExpressionType::OPERATOR_IS_NOT_NULL:
 			return children.size() == 1 ? Exact(column.sql + " IS NOT NULL") : LOCAL_ONLY;
 		case ExpressionType::COMPARE_IN: {
-			if (kind == ColumnKind::NULL_CHECKS_ONLY || children.size() - 1 > MAX_IN_LIST) {
+			if (kind == ColumnKind::NULL_CHECKS_ONLY || children.size() - 1 > MAX_IN_VALUES) {
 				return LOCAL_ONLY;
 			}
 			vector<string> literals;
@@ -480,7 +632,16 @@ private:
 				}
 				literals.push_back(std::move(literal));
 			}
-			return Exact(column.sql + " IN (" + StringUtil::Join(literals, ", ") + ")");
+			vector<string> lists;
+			for (idx_t start = 0; start < literals.size(); start += MAX_IN_LIST) {
+				auto end = MinValue(start + MAX_IN_LIST, literals.size());
+				lists.push_back(column.sql + " IN (" +
+				                StringUtil::Join(vector<string>(literals.begin() + NumericCast<int64_t>(start),
+				                                                literals.begin() + NumericCast<int64_t>(end)),
+				                                 ", ") +
+				                ")");
+			}
+			return Exact(lists.size() == 1 ? lists[0] : "(" + StringUtil::Join(lists, " OR ") + ")");
 		}
 		default:
 			return LOCAL_ONLY;
