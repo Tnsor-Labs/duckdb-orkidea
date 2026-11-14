@@ -634,7 +634,7 @@ private:
 			}
 			vector<string> lists;
 			for (idx_t start = 0; start < literals.size(); start += MAX_IN_LIST) {
-				auto end = MinValue(start + MAX_IN_LIST, literals.size());
+				auto end = MinValue<idx_t>(start + MAX_IN_LIST, literals.size());
 				lists.push_back(column.sql + " IN (" +
 				                StringUtil::Join(vector<string>(literals.begin() + NumericCast<int64_t>(start),
 				                                                literals.begin() + NumericCast<int64_t>(end)),
