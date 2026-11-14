@@ -207,9 +207,10 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &cont
 
 namespace {
 
-//! Tables described by one query, at most: enough to save most round trips,
-//! few enough to keep the query cheap to parse.
-constexpr idx_t MAX_BATCH_TABLES = 50;
+//! Tables described by one query, at most. Oracle takes longer to parse a
+//! join the more tables it has: about 5 ms a table up to 20 tables, 15 ms at
+//! 50 and 60 ms at 100. Batches of 16 save most round trips at that cost.
+constexpr idx_t MAX_BATCH_TABLES = 16;
 
 //! The column put between two tables' columns in a batch, to tell them apart.
 string BatchMarker(idx_t index) {

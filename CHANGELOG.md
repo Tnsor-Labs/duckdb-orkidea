@@ -10,6 +10,17 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+### Catalog
+
+- **Listings describe tables 16 to a query** -- @hc12r. They described up
+  to 50, but Oracle takes much longer to plan a join the more tables it
+  has: about 5 ms a table up to 20 tables, 15 ms at 50, and 60 ms at 100,
+  though the query returns no rows. With 456 tables, on the lab's machine
+  and with Oracle's shared pool flushed, `duckdb_columns()` takes 7.5 s
+  instead of 13 s, of which planning the batches takes 3.3 s instead of
+  9 s. Listing again, once Oracle has the plans, takes 0.2 s, and 1 s with
+  20 ms between DuckDB and Oracle.
+
 ## [0.3.0] - 2026-11-13
 
 Orkidea 0.3.0 lists attached databases without holding up other queries,
