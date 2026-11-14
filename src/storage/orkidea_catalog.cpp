@@ -62,9 +62,9 @@ void ConnectionPool::Release(unique_ptr<Connection> connection) {
 }
 
 OrkideaCatalog::OrkideaCatalog(AttachedDatabase &db, shared_ptr<ConnectionPool> pool_p, DatabaseInfo info_p,
-                               string schema_filter_p, string path_p)
+                               string schema_filter_p, bool columns_from_dictionary_p, string path_p)
     : Catalog(db), pool(std::move(pool_p)), info(std::move(info_p)), schema_filter(std::move(schema_filter_p)),
-      path(std::move(path_p)) {
+      columns_from_dictionary(columns_from_dictionary_p), path(std::move(path_p)) {
 }
 
 OrkideaCatalog::~OrkideaCatalog() = default;

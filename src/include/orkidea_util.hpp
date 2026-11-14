@@ -23,9 +23,11 @@ string QuoteIdentifier(const string &name);
 //! A quoted Oracle string literal.
 string QuoteLiteral(const string &value);
 
-//! The Oracle name for a name given in DuckDB, quoted: a name valid unquoted
-//! (`items`) becomes upper-case (`"ITEMS"`), as the driver's ingest does, and
+//! The name Oracle stores for a name given in DuckDB: a name valid unquoted
+//! (`items`) becomes upper-case (`ITEMS`), as the driver's ingest does, and
 //! any other name is kept exactly.
+string StoredOracleName(const string &name);
+//! StoredOracleName, quoted.
 string NewOracleName(const string &name);
 
 //! The Oracle column type the driver's ingest creates for a DuckDB type (see

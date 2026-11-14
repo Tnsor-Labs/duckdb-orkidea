@@ -155,8 +155,8 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::DescribeTable(ClientContext 
 	                NumericCast<idx_t>(described.arrow_schema.n_children));
 }
 
-optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &context, const string &oracle_name,
-                                                             const ArrowSchema &described, idx_t offset, idx_t count) {
+unique_ptr<OrkideaTableEntry> OrkideaSchemaEntry::NewEntry(ClientContext &context, const string &oracle_name,
+                                                           const ArrowSchema &described, idx_t offset, idx_t count) {
 	auto table = make_shared_ptr<OracleTable>();
 	table->schema = name.GetIdentifierName();
 	table->name = oracle_name;
@@ -186,6 +186,21 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &cont
 		create_info.columns.AddColumn(std::move(column));
 	}
 
+	{
+		lock_guard<mutex> guard(lock);
+		auto known = table_names.find(oracle_name);
+		if (known != table_names.end()) {
+			table->estimated_rows = known->second.estimated_rows;
+			table->splittable = known->second.splittable;
+			table->has_rowid = known->second.has_rowid;
+		}
+	}
+	return make_uniq<OrkideaTableEntry>(ParentCatalog(), *this, create_info, std::move(table));
+}
+
+optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &context, const string &oracle_name,
+                                                             const ArrowSchema &described, idx_t offset, idx_t count) {
+	auto entry = NewEntry(context, oracle_name, described, offset, count);
 	lock_guard<mutex> guard(lock);
 	// Another statement may have described it meanwhile: the first entry is
 	// kept, since statements may already use it.
@@ -193,16 +208,44 @@ optional_ptr<OrkideaTableEntry> OrkideaSchemaEntry::AddTable(ClientContext &cont
 	if (cached != tables.end()) {
 		return cached->second.get();
 	}
-	auto known = table_names.find(oracle_name);
-	if (known != table_names.end()) {
-		table->estimated_rows = known->second.estimated_rows;
-		table->splittable = known->second.splittable;
-		table->has_rowid = known->second.has_rowid;
-	}
-	auto entry = make_uniq<OrkideaTableEntry>(ParentCatalog(), *this, create_info, std::move(table));
 	auto &result = *entry;
 	tables.emplace(oracle_name, std::move(entry));
 	return &result;
+}
+
+void OrkideaSchemaEntry::ReadDictionary(ClientContext &context) {
+	{
+		lock_guard<mutex> guard(lock);
+		if (dictionary_read) {
+			return;
+		}
+	}
+	// One struct field per table the dictionary describes exactly, holding
+	// its columns; the driver leaves out the others, which are described.
+	ArrowSchemaWrapper described;
+	Statement statement(OrkideaTransaction::Get(context, ParentCatalog()).GetConnection());
+	statement.SetOption("oracle.table_schemas", QuoteIdentifier(name.GetIdentifierName()));
+	statement.ExecuteSchema(described.arrow_schema);
+	vector<pair<string, unique_ptr<OrkideaTableEntry>>> entries;
+	auto &schema = described.arrow_schema;
+	for (idx_t i = 0; i < NumericCast<idx_t>(schema.n_children); i++) {
+		auto &table = *schema.children[i];
+		try {
+			entries.emplace_back(table.name,
+			                     NewEntry(context, table.name, table, 0, NumericCast<idx_t>(table.n_children)));
+		} catch (std::exception &) {
+			// A type DuckDB cannot read: left out of listings, as when the
+			// table is described.
+		}
+	}
+	lock_guard<mutex> guard(lock);
+	if (dictionary_read) {
+		return;
+	}
+	for (auto &entry : entries) {
+		listed_tables.emplace(entry.first, std::move(entry.second));
+	}
+	dictionary_read = true;
 }
 
 namespace {
@@ -362,11 +405,14 @@ void OrkideaSchemaEntry::Scan(ClientContext &context, CatalogType type,
 		return;
 	}
 	ListTables(context);
+	if (GetOrkideaCatalog().ColumnsFromDictionary()) {
+		ReadDictionary(context);
+	}
 	vector<string> undescribed;
 	{
 		lock_guard<mutex> guard(lock);
 		for (auto &table : table_names) {
-			if (!tables.count(table.first)) {
+			if (!tables.count(table.first) && !listed_tables.count(table.first)) {
 				undescribed.push_back(table.first);
 			}
 		}
@@ -374,6 +420,7 @@ void OrkideaSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	std::sort(undescribed.begin(), undescribed.end());
 	DescribeTables(context, undescribed);
 
+	// A table described for a statement is shown as described.
 	vector<reference<CatalogEntry>> entries;
 	{
 		lock_guard<mutex> guard(lock);
@@ -381,6 +428,11 @@ void OrkideaSchemaEntry::Scan(ClientContext &context, CatalogType type,
 			auto described = tables.find(table.first);
 			if (described != tables.end()) {
 				entries.push_back(*described->second);
+				continue;
+			}
+			auto listed = listed_tables.find(table.first);
+			if (listed != listed_tables.end()) {
+				entries.push_back(*listed->second);
 			}
 		}
 	}
@@ -560,12 +612,14 @@ optional_ptr<CatalogEntry> OrkideaSchemaEntry::CreateType(CatalogTransaction, Cr
 void OrkideaSchemaEntry::Retire(const string &oracle_name) {
 	lock_guard<mutex> guard(lock);
 	keys_cover.erase(oracle_name);
-	auto entry = tables.find(oracle_name);
-	if (entry != tables.end()) {
-		// DuckDB may still hold the entry for the statement that runs; it
-		// stays alive until the database is detached.
-		retired.push_back(std::move(entry->second));
-		tables.erase(entry);
+	// DuckDB may still hold an entry for the statement that runs; it stays
+	// alive until the database is detached.
+	for (auto map : {&tables, &listed_tables}) {
+		auto entry = map->find(oracle_name);
+		if (entry != map->end()) {
+			retired.push_back(std::move(entry->second));
+			map->erase(entry);
+		}
 	}
 	table_names.erase(oracle_name);
 }
@@ -637,10 +691,13 @@ void OrkideaSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) 
 	auto &oracle_table = table->GetOracleTable();
 	auto native_boolean = GetOrkideaCatalog().GetDatabaseInfo().major_version >= 23;
 	auto prefix = "ALTER TABLE " + oracle_table.QualifiedName();
+	// The table's Oracle name once altered.
+	auto altered_name = oracle_table.name;
 	string sql;
 	switch (alter.alter_table_type) {
 	case AlterTableType::RENAME_TABLE:
-		sql = prefix + " RENAME TO " + NewOracleName(alter.Cast<RenameTableInfo>().new_table_name.GetIdentifierName());
+		altered_name = StoredOracleName(alter.Cast<RenameTableInfo>().new_table_name.GetIdentifierName());
+		sql = prefix + " RENAME TO " + QuoteIdentifier(altered_name);
 		break;
 	case AlterTableType::RENAME_COLUMN: {
 		auto &rename = alter.Cast<RenameColumnInfo>();
@@ -725,10 +782,11 @@ void OrkideaSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) 
 		ThrowNotSupported("This ALTER TABLE");
 	}
 	// Oracle commits DDL, so it runs on a session of its own. The table is
-	// described again when it is next used.
+	// described again when it is next used, or listed.
 	auto oracle_name = oracle_table.name;
 	ExecuteStatement(context, GetOrkideaCatalog().AcquireConnection(), sql);
 	Retire(oracle_name);
+	QueryTableNames(context, "table_name = " + QuoteLiteral(altered_name));
 }
 
 void OrkideaSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {

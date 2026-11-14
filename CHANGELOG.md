@@ -10,6 +10,25 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+### Catalog
+
+- **`COLUMNS 'dictionary'` lists tables from the data dictionary** --
+  @hc12r. With the `ATTACH` option, listings read the columns of a
+  schema's tables with one dictionary query instead of describing them 16
+  to a query; views, and tables the dictionary cannot describe exactly
+  (`VECTOR`, `XMLTYPE`, object types, virtual columns declared with a
+  precision), are still described. Statements describe the tables they
+  use either way. With 400 tables, on the lab's machine, listing takes
+  1.9 s instead of 4.6 s with Oracle's shared pool flushed, and 0.8 s
+  instead of 1.6 s with 50 ms between DuckDB and Oracle once Oracle has the
+  plans. A test checks that both modes list every table of the test schema
+  with the same columns. Built on the Orkidea driver's
+  `oracle.table_schemas`.
+- **An altered table stays listed** -- @hc12r. After an `ALTER TABLE` from
+  DuckDB, the table was left out of `duckdb_tables()` and
+  `duckdb_columns()` until a statement used it; a renamed one, under its
+  new name too.
+
 ## [0.3.1] - 2026-11-14
 
 Orkidea 0.3.1 describes listed tables 16 to a query instead of 50, which

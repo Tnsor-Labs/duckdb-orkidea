@@ -51,7 +51,7 @@ private:
 class OrkideaCatalog : public Catalog {
 public:
 	OrkideaCatalog(AttachedDatabase &db, shared_ptr<ConnectionPool> pool, DatabaseInfo info, string schema_filter,
-	               string path);
+	               bool columns_from_dictionary, string path);
 	~OrkideaCatalog() override;
 
 	void Initialize(bool load_builtin) override;
@@ -97,6 +97,11 @@ public:
 	const DatabaseInfo &GetDatabaseInfo() const {
 		return info;
 	}
+	//! Whether listings read tables' columns from the data dictionary
+	//! (ATTACH option COLUMNS 'dictionary') instead of describing them.
+	bool ColumnsFromDictionary() const {
+		return columns_from_dictionary;
+	}
 	//! Drops a table from the cache, after it was dropped in Oracle.
 	void ForgetTable(const string &schema, const string &table);
 
@@ -114,6 +119,7 @@ private:
 	DatabaseInfo info;
 	//! When set, the only schema the catalog shows.
 	string schema_filter;
+	bool columns_from_dictionary;
 	//! The attach target, without credentials.
 	string path;
 

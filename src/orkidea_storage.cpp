@@ -52,14 +52,22 @@ unique_ptr<Catalog> Attach(optional_ptr<StorageExtensionInfo>, ClientContext &co
                            const string &, AttachInfo &info, AttachOptions &options) {
 	string secret;
 	string schema;
+	bool columns_from_dictionary = false;
 	for (auto &option : options.options) {
 		auto key = StringUtil::Lower(option.first);
 		if (key == "secret") {
 			secret = option.second.ToString();
 		} else if (key == "schema") {
 			schema = option.second.ToString();
+		} else if (key == "columns") {
+			auto source = StringUtil::Lower(option.second.ToString());
+			if (source != "describe" && source != "dictionary") {
+				throw BinderException("COLUMNS for an orkidea database is 'describe' or 'dictionary', not '%s'",
+				                      option.second.ToString());
+			}
+			columns_from_dictionary = source == "dictionary";
 		} else {
-			throw BinderException("Unknown option for an orkidea database: %s (expected SECRET or SCHEMA)",
+			throw BinderException("Unknown option for an orkidea database: %s (expected SECRET, SCHEMA, or COLUMNS)",
 			                      option.first);
 		}
 	}
@@ -76,7 +84,7 @@ unique_ptr<Catalog> Attach(optional_ptr<StorageExtensionInfo>, ClientContext &co
 	auto pool = make_shared_ptr<ConnectionPool>(std::move(database));
 	auto database_info = ReadDatabaseInfo(context, *pool);
 	return make_uniq<OrkideaCatalog>(db, std::move(pool), std::move(database_info), std::move(schema),
-	                                 DisplayPath(target));
+	                                 columns_from_dictionary, DisplayPath(target));
 }
 
 unique_ptr<TransactionManager> CreateTransactionManager(optional_ptr<StorageExtensionInfo>, AttachedDatabase &db,

@@ -62,6 +62,15 @@ SHOW ALL TABLES;
 - Names match case-insensitively. An exact match comes first, then the
   unquoted (upper-case) Oracle name.
 - Tables are described on first use and cached until `DETACH`.
+- Listings (`duckdb_tables()`, `duckdb_columns()`, `information_schema`, and
+  the DuckDB UI's sidebar) describe a schema's tables 16 to a query.
+  `COLUMNS 'dictionary'` reads their columns from Oracle's data dictionary
+  instead, with one query per schema, which helps with many tables or a
+  distant database. Views, and tables whose columns the dictionary cannot
+  describe exactly (`VECTOR`, `XMLTYPE`, object types, and virtual columns
+  declared with a precision), are still described. Only listings change:
+  a statement describes the tables it uses, as with the default,
+  `COLUMNS 'describe'`.
 - Each DuckDB transaction runs on one Oracle connection. Tables can be
   created, filled, and dropped; see [Writing](#writing).
 

@@ -25,12 +25,16 @@ string QuoteLiteral(const string &value) {
 	return "'" + StringUtil::Replace(value, "'", "''") + "'";
 }
 
-string NewOracleName(const string &name) {
+string StoredOracleName(const string &name) {
 	bool simple = !name.empty() && name.size() <= 128 && StringUtil::CharacterIsAlpha(name[0]);
 	for (auto c : name) {
 		simple = simple && (StringUtil::CharacterIsAlphaNumeric(c) || c == '_' || c == '$' || c == '#');
 	}
-	return QuoteIdentifier(simple ? StringUtil::Upper(name) : name);
+	return simple ? StringUtil::Upper(name) : name;
+}
+
+string NewOracleName(const string &name) {
+	return QuoteIdentifier(StoredOracleName(name));
 }
 
 string OracleColumnType(const LogicalType &type, bool native_boolean) {

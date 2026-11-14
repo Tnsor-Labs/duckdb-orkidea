@@ -1,0 +1,153 @@
+# name: test/sql/attach_dictionary.test
+# description: With COLUMNS 'dictionary', listings read the columns of an attached schema's tables from the data dictionary, and show them as describing the tables would.
+# group: [sql]
+
+require orkidea
+
+require-env ORKIDEA_TEST_URI
+
+statement ok
+CREATE SECRET ora (TYPE orkidea, URI '{ORKIDEA_TEST_URI}');
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT object_name, object_type FROM user_objects WHERE object_type IN (''TABLE'', ''VIEW'') AND (object_name LIKE ''ORKIDEA\_CD\_%'' ESCAPE ''\'' OR object_name LIKE ''orkidea\_cd\_%'' ESCAPE ''\'')) LOOP EXECUTE IMMEDIATE ''DROP '' || t.object_type || '' "'' || t.object_name || ''"'' || CASE t.object_type WHEN ''TABLE'' THEN '' PURGE'' END; END LOOP; END;');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cd_types (n NUMBER, n5 NUMBER(5), n102 NUMBER(10,2), nstar NUMBER(*,0), f FLOAT, bd BINARY_DOUBLE, v VARCHAR2(10 CHAR), nv NVARCHAR2(4), c CHAR(2), r RAW(8), d DATE, ts TIMESTAMP(3), tz TIMESTAMP WITH TIME ZONE, ltz TIMESTAMP WITH LOCAL TIME ZONE, ids INTERVAL DAY TO SECOND, cl CLOB, bl BLOB, b BOOLEAN, j JSON, nn NUMBER(9) NOT NULL, hid NUMBER INVISIBLE)');
+
+statement ok
+FROM orkidea_execute('ora', 'INSERT INTO orkidea_cd_types (n5, v, nn, ltz) VALUES (7, ''seven'', 1, TIMESTAMP ''2025-01-02 03:04:05 +00:00'')');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cd_vector (id NUMBER(3), v VECTOR(3, FLOAT32))');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE "orkidea_cd_Mixed" ("Lower" NUMBER(9), "lower" VARCHAR2(4))');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE VIEW orkidea_cd_view AS SELECT n5 + 1 AS e1, TRIM(v) AS e2, nn FROM orkidea_cd_types');
+
+# A view left invalid by dropping its table: the dictionary still has its
+# columns, but neither listing shows it.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cd_gone (x NUMBER)');
+
+statement ok
+FROM orkidea_execute('ora', 'CREATE VIEW orkidea_cd_bad AS SELECT x FROM orkidea_cd_gone');
+
+statement ok
+FROM orkidea_execute('ora', 'DROP TABLE orkidea_cd_gone PURGE');
+
+statement error
+ATTACH 'ora' AS wrong (TYPE orkidea, COLUMNS 'catalog');
+----
+COLUMNS for an orkidea database is 'describe' or 'dictionary', not 'catalog'
+
+statement ok
+ATTACH 'ora' AS dict (TYPE orkidea, COLUMNS 'Dictionary');
+
+statement ok
+ATTACH 'ora' AS described (TYPE orkidea, COLUMNS 'describe');
+
+# Every table of the schema, the fixtures and the other tests' tables alike,
+# is listed with the columns describing it gives.
+query I
+SELECT count(*) FROM (
+  SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'dict'
+  EXCEPT
+  SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'described');
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'described'
+  EXCEPT
+  SELECT table_name, column_index, column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'dict');
+----
+0
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'dict' AND lower(table_name) LIKE 'orkidea\_cd\_%' ESCAPE '\' ORDER BY table_name;
+----
+ORKIDEA_CD_TYPES
+ORKIDEA_CD_VECTOR
+ORKIDEA_CD_VIEW
+orkidea_cd_Mixed
+
+query III
+SELECT column_name, data_type, is_nullable FROM duckdb_columns() WHERE database_name = 'dict' AND table_name = 'ORKIDEA_CD_TYPES' ORDER BY column_index;
+----
+N	DOUBLE	true
+N5	INTEGER	true
+N102	DECIMAL(10,2)	true
+NSTAR	DECIMAL(38,0)	true
+F	DOUBLE	true
+BD	DOUBLE	true
+V	VARCHAR	true
+NV	VARCHAR	true
+C	VARCHAR	true
+R	BLOB	true
+D	TIMESTAMP_S	true
+TS	TIMESTAMP_MS	true
+TZ	TIMESTAMP WITH TIME ZONE	true
+LTZ	TIMESTAMP WITH TIME ZONE	true
+IDS	INTERVAL	true
+CL	VARCHAR	true
+BL	BLOB	true
+B	BOOLEAN	true
+J	JSON	true
+NN	INTEGER	true
+
+# The VECTOR table, which the dictionary does not describe, is described.
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'dict' AND table_name = 'ORKIDEA_CD_VECTOR' ORDER BY column_index;
+----
+ID	SMALLINT
+V	FLOAT[3]
+
+# Statements read with the columns Oracle describes, filters and all.
+query IIT
+SELECT n5, nn, v FROM dict.orkidea_cd_types WHERE ltz = TIMESTAMPTZ '2025-01-02 03:04:05+00';
+----
+7	1	seven
+
+query RTI
+FROM dict.orkidea_cd_view;
+----
+8.0	seven	1
+
+# A table altered from DuckDB is listed with its new column.
+statement ok
+ALTER TABLE dict."orkidea_cd_Mixed" ADD COLUMN added DATE;
+
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'dict' AND table_name = 'orkidea_cd_Mixed' ORDER BY column_index;
+----
+Lower	INTEGER
+lower:1	VARCHAR
+ADDED	TIMESTAMP_S
+
+# And a table renamed from DuckDB, under its new name.
+statement ok
+ALTER TABLE dict."orkidea_cd_Mixed" RENAME TO orkidea_cd_renamed;
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'dict' AND lower(table_name) IN ('orkidea_cd_mixed', 'orkidea_cd_renamed');
+----
+ORKIDEA_CD_RENAMED
+
+# So is a table created after the listing.
+statement ok
+FROM orkidea_execute('ora', 'CREATE TABLE orkidea_cd_late (w VARCHAR2(3))');
+
+statement ok
+INSERT INTO dict.orkidea_cd_late VALUES ('w');
+
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'dict' AND table_name = 'ORKIDEA_CD_LATE';
+----
+W	VARCHAR
+
+statement ok
+FROM orkidea_execute('ora', 'BEGIN FOR t IN (SELECT object_name, object_type FROM user_objects WHERE object_type IN (''TABLE'', ''VIEW'') AND (object_name LIKE ''ORKIDEA\_CD\_%'' ESCAPE ''\'' OR object_name LIKE ''orkidea\_cd\_%'' ESCAPE ''\'')) LOOP EXECUTE IMMEDIATE ''DROP '' || t.object_type || '' "'' || t.object_name || ''"'' || CASE t.object_type WHEN ''TABLE'' THEN '' PURGE'' END; END LOOP; END;');

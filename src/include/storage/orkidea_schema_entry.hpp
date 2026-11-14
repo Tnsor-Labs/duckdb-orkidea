@@ -78,10 +78,17 @@ private:
 	optional_ptr<OrkideaTableEntry> FindTable(ClientContext &context, const string &name);
 	//! The table's entry, described on first use.
 	optional_ptr<OrkideaTableEntry> DescribeTable(ClientContext &context, const string &oracle_name);
+	//! The entry of a table whose columns are `count` children of `described`
+	//! from `offset`.
+	unique_ptr<OrkideaTableEntry> NewEntry(ClientContext &context, const string &oracle_name,
+	                                       const ArrowSchema &described, idx_t offset, idx_t count);
 	//! Adds the entry of a table whose columns are `count` children of
 	//! `described` from `offset`; or returns the entry added meanwhile.
 	optional_ptr<OrkideaTableEntry> AddTable(ClientContext &context, const string &oracle_name,
 	                                         const ArrowSchema &described, idx_t offset, idx_t count);
+	//! Reads the columns of the schema's tables from the data dictionary, once,
+	//! into `listed_tables`.
+	void ReadDictionary(ClientContext &context);
 	//! Describes tables for a listing, several to a query; ones that cannot be
 	//! described are left out.
 	void DescribeTables(ClientContext &context, const vector<string> &oracle_names);
@@ -104,6 +111,11 @@ private:
 	unordered_map<string, TableListing> table_names;
 	//! Described tables, keyed by Oracle name.
 	unordered_map<string, unique_ptr<OrkideaTableEntry>> tables;
+	//! With COLUMNS 'dictionary', tables as the data dictionary describes
+	//! them, which only listings show: statements look tables up in `tables`,
+	//! so they read with the columns Oracle describes.
+	bool dictionary_read = false;
+	unordered_map<string, unique_ptr<OrkideaTableEntry>> listed_tables;
 	//! Entries of tables dropped or altered since, which statements may still use.
 	vector<unique_ptr<OrkideaTableEntry>> retired;
 	//! Key columns of the listed tables, by table, once read.
