@@ -10,6 +10,23 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
+Orkidea 0.4.0 runs joins of tables of one attached database in Oracle, with
+an aggregate over them, sends long `IN` lists and the keys of joins with
+DuckDB tables and files, and can list a schema's tables from the data
+dictionary (`COLUMNS 'dictionary'`). It is built on the Orkidea driver 0.5.0
+and tested against Oracle Database 23ai Free.
+
+### Behaviour changes to read before upgrading
+
+- **`NUMBER` join keys compare exactly in joins run in Oracle** -- @hc12r.
+  DuckDB casts a `NUMBER(19)` key to `DOUBLE` to join it with a `NUMBER`
+  without a precision, read as `DOUBLE`; in Oracle, the cast is left out
+  and the numbers compare exactly, so keys beyond 2^53 that differ no
+  longer match. `SET orkidea_join_pushdown = false` keeps DuckDB's
+  comparison.
+
 ### Queries
 
 - **Joins run in Oracle** -- @hc12r. A join of tables of one attached
@@ -24,10 +41,6 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
   0.18 s instead of 0.35 s, and 0.20 s instead of 0.57 s with 10 ms between
   DuckDB and Oracle. `SET orkidea_join_pushdown = false` turns it off. A
   test compares every join's result with DuckDB's.
-- **`NUMBER` join keys compare exactly** -- @hc12r. DuckDB casts a
-  `NUMBER(19)` key to `DOUBLE` to join it with a `NUMBER` without a
-  precision, read as `DOUBLE`; in Oracle, the cast is left out and the
-  numbers compare exactly, so keys beyond 2^53 that differ no longer match.
 - **`IN` lists longer than 1,000 values run in Oracle** -- @hc12r. They
   stayed in DuckDB, as Oracle takes at most 1,000 values per list; up to
   10,000 are now sent as lists of 1,000 joined by `OR`. That includes the
@@ -231,7 +244,8 @@ The first release: secrets, `ATTACH` with filter, projection, `LIMIT`, and
 top-N pushdown, parallel snapshot scans, writes inside DuckDB transactions,
 `orkidea_query`, and `orkidea_execute`.
 
-[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.1.0...v0.2.0
