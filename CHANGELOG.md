@@ -10,6 +10,34 @@ and this project follows [Semantic Versioning](https://semver.org/). Before
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
+Orkidea 0.4.1 is built on the Orkidea driver 0.5.1, which brings in the
+fixes Oracle's rust-oracledb has made since 26.0.0-beta.6. It is tested
+against Oracle Database 23ai Free.
+
+### Behaviour changes to read before upgrading
+
+- **`orkidea_execute` gives `NULL` rows affected for PL/SQL** -- @hc12r. It
+  gave 1 for every block, whatever its statements changed, which is what
+  Oracle reports for one. DML statements still give the rows they changed.
+
+### Connections
+
+- **Errors instead of panics while connecting** -- @hc12r. A server
+  requiring Native Network Encryption or Data Integrity (NNE), a packet type
+  the client does not know, or a refusal with a non-numeric error code made
+  the driver panic; the panic was caught, but then every later Oracle query
+  in the DuckDB process failed. These now give an error, and the process
+  carries on ([oracle/rust-oracledb#40](https://github.com/oracle/rust-oracledb/issues/40)).
+
+### Benchmarks
+
+- **Compared with `oracle_scanner`, `odbc_scanner`, and ConnectorX** --
+  @hc12r. The [benchmarks](bench/README.md) were run again with 0.4.0 and
+  add DuckDB's `oracle_scanner` and `odbc_scanner` (with Oracle's ODBC
+  driver), and, from Python, ConnectorX.
+
 ## [0.4.0] - 2026-11-14
 
 Orkidea 0.4.0 runs joins of tables of one attached database in Oracle, with
@@ -244,7 +272,8 @@ The first release: secrets, `ATTACH` with filter, projection, `LIMIT`, and
 top-N pushdown, parallel snapshot scans, writes inside DuckDB transactions,
 `orkidea_query`, and `orkidea_execute`.
 
-[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Tnsor-Labs/duckdb-orkidea/compare/v0.2.0...v0.3.0
