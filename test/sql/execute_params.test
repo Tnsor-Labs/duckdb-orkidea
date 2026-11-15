@@ -40,11 +40,12 @@ FROM orkidea_execute('ora', 'UPDATE orkidea_ep_t SET name = name || :s WHERE id 
 ----
 2
 
-# In PL/SQL a name binds once, however often it appears.
+# In PL/SQL a name binds once, however often it appears. Oracle does not
+# report the rows a block changes, so rows_affected is NULL.
 query I
 FROM orkidea_execute('ora', 'BEGIN INSERT INTO orkidea_ep_t (id, name) VALUES (:id, :n || :n); END;', params := {'id': 4, 'n': 'y'});
 ----
-1
+NULL
 
 query ITTR
 SELECT id, name, born, amount FROM orkidea_query('ora', 'SELECT * FROM orkidea_ep_t ORDER BY id');

@@ -346,7 +346,8 @@ Things to know:
   `params := {'t': ts AT TIME ZONE 'UTC'}`, and convert it with
   `FROM_TZ(CAST(:t AS TIMESTAMP), 'UTC')`.
 
-Run DDL, DML, or PL/SQL. The result is the number of rows affected:
+Run DDL, DML, or PL/SQL. The result is the number of rows affected, or
+`NULL` for PL/SQL, as Oracle does not report the rows a block changes:
 
 ```sql
 FROM orkidea_execute('ora', 'UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10');
