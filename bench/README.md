@@ -1,68 +1,87 @@
 # Benchmarks
 
-How orkidea compares with DuckDB's other Oracle extension,
-[`oracle`](https://duckdb.org/community_extensions/extensions/oracle), and how
-the Orkidea ADBC driver compares with
-[python-oracledb](https://python-oracledb.readthedocs.io/), on the
+How orkidea compares with DuckDB's other ways to read Oracle (the
+[`oracle`](https://duckdb.org/community_extensions/extensions/oracle) and
+[`oracle_scanner`](https://duckdb.org/community_extensions/extensions/oracle_scanner)
+community extensions, and
+[`odbc_scanner`](https://duckdb.org/community_extensions/extensions/odbc_scanner)
+with Oracle's ODBC driver), and how the Orkidea ADBC driver compares with
+[python-oracledb](https://python-oracledb.readthedocs.io/) and
+[ConnectorX](https://github.com/sfu-db/connector-x), on the
 [lab](../lab/README.md) database.
 
 ## Results
 
-Measured on 2026-11-10: orkidea from `main` (driver 0.3.0), `oracle` 0.3.1
-with Oracle Instant Client 23.26, and python-oracledb 26.1.0, in DuckDB
-2.0.0. Each figure is the median of five runs, after one to warm up.
+Measured on 2026-11-15: orkidea 0.4.0 (driver 0.5.0), `oracle` 0.3.1 and
+`odbc_scanner` with Oracle Instant Client 23.26 and its ODBC driver,
+`oracle_scanner` 0.6.2, python-oracledb 26.1.0, and ConnectorX 0.4.6, in
+DuckDB 2.0.0. Each figure is the median of five runs, after one to warm up.
 
-| Query | orkidea | orkidea, 1 session | `oracle` | `oracle`, tuned |
-| --- | ---: | ---: | ---: | ---: |
-| Copy `ORDERS` into DuckDB: 1M rows, 7 columns | **0.63 s** | 1.33 s | 12.57 s | 11.82 s |
-| Copy 2 of the 7 columns | **0.30 s** | 0.45 s | 4.61 s | 3.94 s |
-| Orders of one month (8% of rows) | 0.23 s | **0.18 s** | 1.09 s | 1.13 s |
-| Orders of one customer (50 rows) | **39 ms** | 42 ms | 48 ms | 110 ms |
-| `GROUP BY status`: `count`, `sum`, `avg` | **0.19 s** | 0.20 s | 5.30 s | 4.53 s |
-| `count(*)` with a filter | **43 ms** | 43 ms | 83 ms | 62 ms |
-| Top 10 by amount | **0.13 s** | 0.14 s | 4.65 s | 3.91 s |
-| `ORDERS` ⋈ `CUSTOMERS` ⋈ `REGIONS`, by region | **0.34 s** | 0.48 s | fails | fails |
-| Point lookup on `EMP`, per query | **2.0 ms** | 2.4 ms | 4.7 ms | 12.9 ms |
+| Query | orkidea | orkidea, 1 session | `oracle_scanner` | `oracle`, tuned | `odbc_scanner`, tuned |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Copy `ORDERS` into DuckDB: 1M rows, 7 columns | **0.59 s** | 1.33 s | 3.64 s | 10.80 s | 5.59 s |
+| Copy 2 of the 7 columns | **0.27 s** | 0.42 s | 1.15 s | 3.76 s | 1.79 s |
+| Orders of one month (8% of rows) | **0.17 s** | 0.18 s | 0.32 s | 1.07 s | 0.49 s |
+| Orders of one customer (50 rows) | 35 ms | **35 ms** | 36 ms | 95 ms | 36 ms |
+| `GROUP BY status`: `count`, `sum`, `avg` | 0.21 s | **0.18 s** | 2.10 s | 3.97 s | |
+| `count(*)` with a filter | 38 ms | **37 ms** | 39 ms | 58 ms | |
+| Top 10 by amount | 0.13 s | 0.14 s | 0.13 s | 3.61 s | |
+| `ORDERS` ⋈ `CUSTOMERS` ⋈ `REGIONS`, by region | **0.19 s** | **0.19 s** | 1.41 s | fails | |
+| Point lookup on `EMP`, per query | **1.6 ms** | **1.6 ms** | 1.7 ms | 11.6 ms | 2.1 ms |
 
 - **orkidea** is the default: tables of 500,000 rows or more are read by up
-  to eight sessions in ROWID ranges, and aggregates and top-N queries run in
-  Oracle. With aggregate pushdown off, the `GROUP BY` takes 0.34 s and the
-  filtered `count(*)` 64 ms; the other figures do not change
-  (`results.json` has every run).
+  to eight sessions in ROWID ranges, and filters, aggregates, top-N queries,
+  and joins of tables of one database run in Oracle.
 - **orkidea, 1 session** sets `orkidea_parallel_scan = 1`.
+- **`oracle_scanner`** is shown with `oracle_parallel_scan = 1`, its faster
+  setting here; with its default parallel scan, the month's orders take
+  0.43 s and the customer's 0.13 s, and the other figures are within 11%.
 - **`oracle`, tuned** sets `oracle_array_size = 2048` (its maximum) and
-  `oracle_prefetch_rows = 10000`.
-- **The join fails** in `oracle`, which cannot read a table with a
-  `BOOLEAN` column (Oracle 23ai's SQL `BOOLEAN`), even when the query does
-  not select it: "Unsupported Oracle type BOOLEAN for
-  ORKIDEA_LAB.CUSTOMERS.VIP".
+  `oracle_prefetch_rows = 10000`; untuned, it is slower on the copies
+  (11.46 s and 4.30 s) and faster on small results (46 ms and 3.6 ms).
+  It cannot run the join: it fails on the `BOOLEAN` column of `CUSTOMERS`
+  (Oracle 23ai's SQL `BOOLEAN`), even when the query does not select it.
+- **`odbc_scanner`** has no catalog: it runs Oracle SQL written by hand, so it
+  is only measured on the reads, as orkidea's pushdown would write them.
+  Tuned, it sets a 1 MB fetch buffer (`FBS`); untuned, the copies take 6.46 s
+  and 2.12 s.
+- With aggregate pushdown off (`orkidea_aggregate_pushdown = false`), the
+  `GROUP BY` takes 0.34 s and the join 0.32 s. `results.json` has every
+  engine and setting.
 
 What makes the difference:
 
 - **Scans.** The Orkidea driver decodes values from the network buffer
-  straight into Arrow columns. One orkidea session reads `ORDERS` nine
-  times as fast as `oracle` does, and parallel sessions take that to twenty.
-- **Pushdown.** orkidea sends the `GROUP BY` and the top-N to Oracle, which
-  returns three rows and ten; `oracle` reads the million rows into DuckDB
-  first.
+  straight into Arrow columns. One session copies `ORDERS` almost three times
+  as fast as `oracle_scanner` and eight times as fast as `oracle`, and
+  parallel sessions more than halve that again.
+- **Pushdown.** orkidea sends the `GROUP BY`, the top-N, and the join to
+  Oracle, which returns a few rows. `oracle_scanner` is as fast on the top-N,
+  but its `GROUP BY` and join take 2.10 s and 1.41 s, about the time it
+  takes to read the rows into DuckDB; `oracle` takes about that long on all
+  three.
 - **Small results** are close: there the time is Oracle's, finding 50 rows
-  in a million without an index. For the month's orders, the parallel
-  scan's planning costs more than its eight sessions save.
+  in a million without an index.
 
-With driver 0.2.1, which built a row object for each row before converting
-it, the same copies took 1.11 s (3.29 s through one session) and 0.61 s.
+From Python, reading into an Arrow table:
 
-From Python, reading into an Arrow table through one session:
+| Query | Orkidea ADBC 0.5.0 | ConnectorX | ConnectorX, 8 partitions | python-oracledb, `arraysize=10000` |
+| --- | ---: | ---: | ---: | ---: |
+| `ORDERS`: 1M rows, 7 columns | **1.19 s** | 3.22 s | 1.32 s | 2.50 s |
+| 2 of the 7 columns | **0.40 s** | 1.49 s | 0.96 s | 0.81 s |
 
-| Query | Orkidea ADBC 0.3.0 | python-oracledb | python-oracledb, `arraysize=10000` |
-| --- | ---: | ---: | ---: |
-| `ORDERS`: 1M rows, 7 columns | **1.60 s** | 5.01 s | 2.50 s |
-| 2 of the 7 columns | **0.46 s** | 3.46 s | 1.07 s |
-
-python-oracledb's `fetch_df_all` also decodes Oracle's wire format straight
-into Arrow arrays; the Orkidea driver does so in Rust, and decodes `NUMBER`
-into integers and decimals from its bytes. Driver 0.2.1 took 3.36 s and
-1.38 s.
+- **Orkidea ADBC** reads through one session. python-oracledb uses
+  `fetch_df_all`, which also decodes Oracle's wire format straight into
+  Arrow arrays; with its default `arraysize`, it takes 4.01 s and 2.28 s.
+- **ConnectorX** opens its connections on every call, inside the timing; so
+  does the Orkidea driver read in 8 partitions, which takes 1.49 s and 1.23 s.
+  Its partitions are hash partitions (see the driver's
+  [partitioned reads](https://github.com/Tnsor-Labs/orkidea-adbc/blob/main/docs/partitions.md)),
+  so Oracle reads the table once for each of the eight; on a table this size,
+  one session is faster.
+- A second run of these engines, on a busier machine (load average 5), gave
+  the same order: 1.37 s and 0.43 s for Orkidea ADBC, against 3.37 s and
+  1.58 s for ConnectorX.
 
 ## Other column types
 
@@ -157,12 +176,14 @@ most of the time, and the two are level.
 ## Running them
 
 The benchmark needs the lab database, and Oracle Instant Client for the
-`oracle` extension (orkidea and the Orkidea driver need no Oracle client):
+`oracle` extension and ConnectorX, with Oracle's ODBC package unzipped into
+the same directory and unixODBC installed for `odbc_scanner` (orkidea and
+the Orkidea driver need no Oracle client):
 
 ```sh
 lab/setup.sh
 python -m venv .venv && .venv/bin/pip install -r bench/requirements.txt
-# Instant Client Basic or Basic Light, from oracle.com, unzipped anywhere:
+# Instant Client Basic or Basic Light, and the ODBC package, from oracle.com:
 ORACLE_IC=/path/to/instantclient_23_26 .venv/bin/python bench/run.py
 ```
 
@@ -177,5 +198,5 @@ table's queries at each delay (default 0, 1, 5, and 20 ms) into
 `bench/results-network-<delay>ms.json`, and removes the delay when it ends.
 
 `--runs` sets the number of timed runs (default 5). A full run takes about
-fifteen minutes, most of it in the `oracle` extension's scans, and the
+twenty minutes, most of it in the `oracle` extension's scans, and the
 network runs half an hour.

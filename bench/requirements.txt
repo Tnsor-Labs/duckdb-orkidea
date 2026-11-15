@@ -1,4 +1,5 @@
 duckdb==2.0.0
 pyarrow
 oracledb
-adbc-driver-orkidea[dbapi]==0.3.0
+connectorx==0.4.6
+adbc-driver-orkidea[dbapi]==0.5.0

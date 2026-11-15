@@ -1,9 +1,15 @@
-"""Benchmarks orkidea against DuckDB's `oracle` community extension, and the
-Orkidea ADBC driver against python-oracledb, on the lab database.
+"""Benchmarks orkidea against DuckDB's other ways to read Oracle (the `oracle`
+and `oracle_scanner` community extensions, and `odbc_scanner` with Oracle's
+ODBC driver), and the Orkidea ADBC driver against python-oracledb and
+ConnectorX, on the lab database.
 
     lab/setup.sh
     python -m venv .venv && .venv/bin/pip install -r bench/requirements.txt
     ORACLE_IC=/path/to/instantclient_23_xx .venv/bin/python bench/run.py
+
+ORACLE_IC is an Instant Client directory (Basic or Basic Light) for the
+`oracle` extension and ConnectorX, with the ODBC package unzipped into it for
+`odbc_scanner`, which also needs unixODBC's libodbc and libodbcinst.
 
 Each engine runs in a process of its own. Every query runs once to warm up
 and then RUNS times; the median is reported. Results are compared across
@@ -49,6 +55,20 @@ DUCKDB_QUERIES = {
 }
 POINT_LOOKUPS = 200
 POINT_SQL = "SELECT ename, sal FROM db.emp WHERE empno = 7839"
+
+# odbc_scanner has no catalog: each query is Oracle SQL sent as it is, so only
+# the reads are compared, written as orkidea's pushdown would send them.
+ODBC_QUERIES = {
+    "scan_all": "SELECT * FROM orders",
+    "scan_narrow": "SELECT order_id, amount FROM orders",
+    "filter_range": ("SELECT * FROM orders WHERE ordered_at >= TIMESTAMP '2025-03-01 00:00:00' "
+                     "AND ordered_at < TIMESTAMP '2025-04-01 00:00:00'"),
+    "filter_point": "SELECT * FROM orders WHERE customer_id = 4242",
+    "point_lookup": "SELECT ename, sal FROM emp WHERE empno = 7839",
+}
+ODBC_FETCH_BUFFER = 1048576
+
+PARTITIONS = 8
 
 PYTHON_QUERIES = {
     "py_scan_all": ("ORDERS to an Arrow table, 1M rows x 7 columns", "SELECT * FROM orders"),
@@ -103,6 +123,24 @@ def duckdb_engine(engine, env, runs, queries, point_lookups):
             con.execute("SET orkidea_parallel_scan = 1")
         if engine == "orkidea-no-aggregates":
             con.execute("SET orkidea_aggregate_pushdown = false")
+    elif engine.startswith("oracle_scanner"):
+        con.execute("INSTALL oracle_scanner FROM community")
+        con.execute("LOAD oracle_scanner")
+        con.execute(
+            "CREATE SECRET lab (TYPE oracle, DSN getvariable('ORKIDEA_LAB_HOST') || ':' || "
+            "getvariable('ORKIDEA_LAB_PORT') || '/' || getvariable('ORKIDEA_LAB_SERVICE'), "
+            "USER getvariable('ORKIDEA_LAB_USER'), PASSWORD getvariable('ORKIDEA_LAB_PASSWORD'))"
+        )
+        con.execute("ATTACH 'lab' AS db (TYPE oracle_scanner)")
+        if engine == "oracle_scanner-1-session":
+            con.execute("SET oracle_parallel_scan = 1")
+    elif engine.startswith("odbc"):
+        con.execute("INSTALL odbc_scanner")
+        con.execute("LOAD odbc_scanner")
+        connect = os.environ["ODBC_CONNECT"]
+        if engine == "odbc-tuned":
+            connect += f";FBS={ODBC_FETCH_BUFFER}"
+        con.execute("SET VARIABLE odbc = odbc_connect(?)", [connect])
     else:
         con.execute("INSTALL oracle FROM community")
         con.execute("LOAD oracle")
@@ -111,14 +149,20 @@ def duckdb_engine(engine, env, runs, queries, point_lookups):
             con.execute("SET oracle_array_size = 2048")
             con.execute("SET oracle_prefetch_rows = 10000")
 
+    extension = next(e for e in ("orkidea", "oracle_scanner", "odbc", "oracle") if engine.startswith(e))
     version = con.sql(
         "SELECT extension_version FROM duckdb_extensions() WHERE extension_name = ?",
-        params=["orkidea" if engine.startswith("orkidea") else "oracle"],
+        params=["odbc_scanner" if extension == "odbc" else extension],
     ).fetchall()[0][0]
     results = {}
     for name, (_, sql) in DUCKDB_QUERIES.items():
         if name not in queries:
             continue
+        if extension == "odbc":
+            if name not in ODBC_QUERIES:
+                continue
+            sql = ("CREATE OR REPLACE TEMP TABLE t AS FROM odbc_query(getvariable('odbc'), "
+                   f"'{ODBC_QUERIES[name].replace(chr(39), chr(39) * 2)}', enable_columns_binding = true)")
         try:
             times = timed(lambda sql=sql: con.execute(sql).fetchall(), runs)
         except duckdb.Error as error:
@@ -128,10 +172,13 @@ def duckdb_engine(engine, env, runs, queries, point_lookups):
         results[name] = {"times": times, "result": fingerprint(con, sql)}
     if "point_lookup" not in queries:
         return {"version": version, "results": results}
-    times = timed(lambda: [con.execute(POINT_SQL).fetchall() for _ in range(point_lookups)], runs)
+    point_sql = POINT_SQL
+    if extension == "odbc":
+        point_sql = f"FROM odbc_query(getvariable('odbc'), '{ODBC_QUERIES['point_lookup']}')"
+    times = timed(lambda: [con.execute(point_sql).fetchall() for _ in range(point_lookups)], runs)
     results["point_lookup"] = {
         "times": [t / point_lookups for t in times],
-        "result": [tuple(str(v) for v in row) for row in con.sql(POINT_SQL).fetchall()],
+        "result": [tuple(str(v) for v in row) for row in con.sql(point_sql).fetchall()],
     }
     return {"version": version, "results": results}
 
@@ -140,25 +187,60 @@ def python_engine(engine, env, runs, queries, point_lookups):
     import pyarrow as pa
     import pyarrow.compute as pc
 
-    if engine == "orkidea-adbc":
+    address = f"{env['ORKIDEA_LAB_HOST']}:{env['ORKIDEA_LAB_PORT']}/{env['ORKIDEA_LAB_SERVICE']}"
+    conn = None
+    if engine.startswith("orkidea-adbc"):
         import adbc_driver_orkidea
         from adbc_driver_orkidea import dbapi
 
-        uri = f"oracle://{env['ORKIDEA_LAB_USER']}@{env['ORKIDEA_LAB_HOST']}:{env['ORKIDEA_LAB_PORT']}/{env['ORKIDEA_LAB_SERVICE']}"
-        conn = dbapi.connect(uri, db_kwargs={"password": env["ORKIDEA_LAB_PASSWORD"]})
+        def connect():
+            return dbapi.connect(f"oracle://{env['ORKIDEA_LAB_USER']}@{address}",
+                                 db_kwargs={"password": env["ORKIDEA_LAB_PASSWORD"]})
+
         version = adbc_driver_orkidea.__version__
+        conn = connect()
+        if engine == "orkidea-adbc-8":
+            from concurrent.futures import ThreadPoolExecutor
+
+            pool = ThreadPoolExecutor(PARTITIONS)
+
+            def read(partition):
+                # A connection per partition, inside the timing, as
+                # ConnectorX opens its own.
+                with connect() as conn, conn.cursor() as cur:
+                    cur.adbc_read_partition(partition)
+                    return cur.fetch_arrow_table()
+
+            def fetch(sql):
+                with conn.cursor() as cur:
+                    cur.adbc_statement.set_options(**{
+                        adbc_driver_orkidea.StatementOptions.PARTITION_COUNT.value: str(PARTITIONS),
+                        adbc_driver_orkidea.StatementOptions.PARTITION_COLUMN.value: "ORDER_ID",
+                    })
+                    partitions, _ = cur.adbc_execute_partitions(sql)
+                return pa.concat_tables(list(pool.map(read, partitions)))
+        else:
+            def fetch(sql):
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    return cur.fetch_arrow_table()
+    elif engine.startswith("connectorx"):
+        from urllib.parse import quote
+
+        import connectorx
+
+        version = connectorx.__version__
+        uri = f"oracle://{env['ORKIDEA_LAB_USER']}:{quote(env['ORKIDEA_LAB_PASSWORD'], safe='')}@{address}"
+        partitioning = {"partition_on": "ORDER_ID", "partition_num": PARTITIONS} if engine == "connectorx-8" else {}
 
         def fetch(sql):
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                return cur.fetch_arrow_table()
+            # read_sql connects on every call; there is no way to keep a
+            # connection.
+            return connectorx.read_sql(uri, sql, return_type="arrow", **partitioning)
     else:
         import oracledb
 
-        conn = oracledb.connect(
-            user=env["ORKIDEA_LAB_USER"], password=env["ORKIDEA_LAB_PASSWORD"],
-            dsn=f"{env['ORKIDEA_LAB_HOST']}:{env['ORKIDEA_LAB_PORT']}/{env['ORKIDEA_LAB_SERVICE']}",
-        )
+        conn = oracledb.connect(user=env["ORKIDEA_LAB_USER"], password=env["ORKIDEA_LAB_PASSWORD"], dsn=address)
         version = oracledb.__version__
         arraysize = 10000 if engine == "python-oracledb-tuned" else oracledb.defaults.arraysize
 
@@ -176,13 +258,16 @@ def python_engine(engine, env, runs, queries, point_lookups):
             "result": [table.num_rows, str(pc.sum(table.column("ORDER_ID")).as_py()),
                        f"{pc.sum(table.column('AMOUNT').cast(pa.float64())).as_py():.2f}"],
         }
-    conn.close()
+    if conn is not None:
+        conn.close()
     return {"version": version, "results": results}
 
 
 ALL_QUERIES = [*DUCKDB_QUERIES, "point_lookup", *PYTHON_QUERIES]
-DUCKDB_ENGINES = ["orkidea", "orkidea-1-session", "orkidea-no-aggregates", "oracle", "oracle-tuned"]
-PYTHON_ENGINES = ["orkidea-adbc", "python-oracledb", "python-oracledb-tuned"]
+DUCKDB_ENGINES = ["orkidea", "orkidea-1-session", "orkidea-no-aggregates", "oracle", "oracle-tuned",
+                  "oracle_scanner", "oracle_scanner-1-session", "odbc", "odbc-tuned"]
+PYTHON_ENGINES = ["orkidea-adbc", "orkidea-adbc-8", "python-oracledb", "python-oracledb-tuned",
+                  "connectorx", "connectorx-8"]
 
 
 def main():
@@ -217,6 +302,12 @@ def main():
     )
     if "ORACLE_IC" in os.environ:
         child["LD_LIBRARY_PATH"] = os.environ["ORACLE_IC"]
+        odbc_driver = sorted(Path(os.environ["ORACLE_IC"]).glob("libsqora.so.*"))
+        if odbc_driver:
+            child["ODBC_CONNECT"] = (
+                f"Driver={odbc_driver[-1]};DBQ={env['ORKIDEA_LAB_HOST']}:{env['ORKIDEA_LAB_PORT']}/"
+                f"{env['ORKIDEA_LAB_SERVICE']};UID={env['ORKIDEA_LAB_USER']};PWD={env['ORKIDEA_LAB_PASSWORD']}"
+            )
 
     report = {}
     for engine in engines:
@@ -231,6 +322,7 @@ def main():
         report[engine] = json.loads(out.stdout)
 
     # Every engine must return what the first of its kind returned.
+    mismatches = []
     for group in (DUCKDB_ENGINES, PYTHON_ENGINES):
         group = [e for e in group if e in report]
         if not group:
@@ -238,14 +330,16 @@ def main():
         base = report[group[0]]["results"]
         for engine in group[1:]:
             for name, value in report[engine]["results"].items():
-                if "error" in value or "error" in base[name]:
+                if "error" in value or "error" in base.get(name, {}):
                     continue
-                if json.dumps(value["result"]) != json.dumps(base[name]["result"]):
-                    sys.exit(f"{engine} returned {value['result']} for {name}, "
-                             f"{group[0]} returned {base[name]['result']}")
+                if name in base and json.dumps(value["result"]) != json.dumps(base[name]["result"]):
+                    mismatches.append(f"{engine} returned {value['result']} for {name}, "
+                                      f"{group[0]} returned {base[name]['result']}")
 
     args.out.write_text(json.dumps(report, indent=1) + "\n")
     print_table(report)
+    if mismatches:
+        sys.exit("\n".join(["", *mismatches]))
 
 
 def print_table(report):
