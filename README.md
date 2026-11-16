@@ -4,15 +4,16 @@ A DuckDB extension for Oracle Database, built on the
 [Orkidea ADBC driver](https://github.com/Tnsor-Labs/orkidea-adbc). It is not
 affiliated with, sponsored by, or endorsed by Oracle Corporation.
 
-**Status:** version 0.4.1 (see the [changelog](CHANGELOG.md)). Once it is published in the DuckDB community
-extensions repository, install it with:
+**Status:** version 0.4.1 (see the [changelog](CHANGELOG.md)). Install it
+from the [DuckDB community extensions repository](https://duckdb.org/community_extensions/extensions/orkidea):
 
 ```sql
 INSTALL orkidea FROM community;
 LOAD orkidea;
 ```
 
-Until then, build it from source (see [Building](#building)).
+The community repository can trail the latest release by a few days. To build
+the latest from source, see [Building](#building).
 
 **Try it:** the [lab](lab/README.md) starts an Oracle database in a container
 and walks through every feature below, from a first query to writes, bind
